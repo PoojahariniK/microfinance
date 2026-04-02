@@ -1,0 +1,121 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 220 20% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+    --primary: 215 80% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 92%;
+    --secondary-foreground: 220 20% 20%;
+    --muted: 220 14% 95%;
+    --muted-foreground: 220 10% 46%;
+    --accent: 215 80% 48%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 88%;
+    --input: 220 13% 88%;
+    --ring: 215 80% 48%;
+    --radius: 0.375rem;
+
+    /* Custom finance tokens */
+    --sidebar-bg: 220 25% 14%;
+    --sidebar-fg: 220 14% 80%;
+    --sidebar-active: 215 80% 48%;
+    --sidebar-hover: 220 25% 20%;
+    --sidebar-border: 220 20% 22%;
+    --success: 142 72% 40%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --info: 199 89% 48%;
+    --info-foreground: 0 0% 100%;
+    --header-bg: 0 0% 100%;
+    --header-border: 220 13% 90%;
+
+    --sidebar-background: 220 25% 14%;
+    --sidebar-foreground: 220 14% 80%;
+    --sidebar-primary: 215 80% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 220 25% 20%;
+    --sidebar-accent-foreground: 220 14% 95%;
+    --sidebar-border: 220 20% 22%;
+    --sidebar-ring: 215 80% 48%;
+  }
+
+  .dark {
+    --background: 220 20% 10%;
+    --foreground: 220 14% 90%;
+    --card: 220 20% 14%;
+    --card-foreground: 220 14% 90%;
+    --popover: 220 20% 14%;
+    --popover-foreground: 220 14% 90%;
+    --primary: 215 80% 55%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 20% 20%;
+    --secondary-foreground: 220 14% 90%;
+    --muted: 220 20% 18%;
+    --muted-foreground: 220 10% 55%;
+    --accent: 215 80% 55%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62% 30%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 20% 22%;
+    --input: 220 20% 22%;
+    --ring: 215 80% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+@layer components {
+  .stat-card {
+    @apply bg-card rounded-lg border p-5 shadow-sm hover:shadow-md transition-shadow;
+  }
+  .page-header {
+    @apply text-xl font-semibold text-foreground mb-6;
+  }
+  .data-table {
+    @apply w-full text-sm;
+  }
+  .data-table th {
+    @apply bg-muted px-4 py-3 text-left font-medium text-muted-foreground uppercase text-xs tracking-wider;
+  }
+  .data-table td {
+    @apply px-4 py-3 border-b;
+  }
+  .data-table tr:hover td {
+    @apply bg-muted/50;
+  }
+  .form-section {
+    @apply bg-card rounded-lg border p-6 shadow-sm;
+  }
+  .sidebar-link {
+    @apply flex items-center gap-3 px-4 py-2.5 text-sm rounded-md transition-colors;
+    color: hsl(var(--sidebar-fg));
+  }
+  .sidebar-link:hover {
+    background: hsl(var(--sidebar-hover));
+  }
+  .sidebar-link.active {
+    background: hsl(var(--sidebar-active));
+    color: hsl(0 0% 100%);
+  }
+}

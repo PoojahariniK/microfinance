@@ -1,0 +1,45 @@
+# ======================
+# BUILD / DEPENDENCIES
+# ======================
+node_modules/
+dist/
+*.local
+
+# ======================
+# LOGS
+# ======================
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ======================
+# ENV (IMPORTANT)
+# ======================
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ======================
+# IDE / EDITORS
+# ======================
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# ======================
+# TESTING / TOOLS
+# ======================
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+.eslintcache
+.stylelintcache
+.nyc_output

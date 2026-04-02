@@ -1,0 +1,21 @@
+package com.microfinance.loanapp.dto;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.time.LocalDate;
+import java.util.List;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class LoanDraftDto {
+    private Long groupId;
+    private Double totalLoanAmount;
+    private Double interestRate;
+    private Integer durationMonths;
+    private LocalDate startDate;
+    private LocalDate endDate;
+    private List<LoanMemberDraftDto> members;
+    private LoanChargesDto charges;
+}

@@ -1,0 +1,1067 @@
+package com.microfinance.loanapp.service;
+
+import com.microfinance.loanapp.dto.*;
+import com.microfinance.loanapp.enums.*;
+import com.microfinance.loanapp.exception.ApiException;
+import com.microfinance.loanapp.model.*;
+import com.microfinance.loanapp.repository.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.DayOfWeek;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class LoanCreationService {
+
+    private final UserRepository userRepository;
+    private final GroupRepository groupRepository;
+    private final MemberGroupRepository memberGroupRepository;
+    private final LoanRepository loanRepository;
+    private final LoanMemberRepository loanMemberRepository;
+    private final LoanScheduleRepository loanScheduleRepository;
+    private final LoanChargesRepository loanChargesRepository;
+    private final LoanChargePaymentRepository loanChargePaymentRepository;
+
+    // =========================================================
+    //  ADMIN VALIDATION
+    // =========================================================
+
+    private User validateAdmin(String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User not found"));
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "User is disabled");
+        }
+        if (user.getRole() != UserRole.ADMIN) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Only admins can perform this action");
+        }
+        return user;
+    }
+
+    private User validateStaffOrAdmin(String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "User not found"));
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "User is disabled");
+        }
+        if (user.getRole() != UserRole.ADMIN && user.getRole() != UserRole.STAFF) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "Unauthorized role for this action");
+        }
+        return user;
+    }
+
+    // =========================================================
+    //  COLLECTION DAY VALIDATION
+    //  Only applied for WEEKLY / BIWEEKLY groups.
+    //  DAILY and MONTHLY have no day-of-week constraint.
+    // =========================================================
+
+    private void validateCollectionDay(LocalDate date, Group group, String fieldName) {
+        CollectionType type = group.getCollectionType();
+        if (type != CollectionType.WEEKLY && type != CollectionType.BIWEEKLY) {
+            return;
+        }
+        CollectionDay collectionDay = group.getCollectionDay();
+        if (collectionDay == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Group has no collection day configured for " + type + " collection");
+        }
+        DayOfWeek expected = toDayOfWeek(collectionDay);
+        DayOfWeek actual   = date.getDayOfWeek();
+        if (actual != expected) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    fieldName + " must match collection day (" + collectionDay + "). Got: " + actual);
+        }
+    }
+
+    private DayOfWeek toDayOfWeek(CollectionDay day) {
+        return switch (day) {
+            case MONDAY    -> DayOfWeek.MONDAY;
+            case TUESDAY   -> DayOfWeek.TUESDAY;
+            case WEDNESDAY -> DayOfWeek.WEDNESDAY;
+            case THURSDAY  -> DayOfWeek.THURSDAY;
+            case FRIDAY    -> DayOfWeek.FRIDAY;
+            case SATURDAY  -> DayOfWeek.SATURDAY;
+            case SUNDAY    -> DayOfWeek.SUNDAY;
+        };
+    }
+
+
+
+    // =========================================================
+    //  INIT LOAN
+    // =========================================================
+
+    public LoanDraftDto initLoan(LoanInitRequest request, String loggedInUser) {
+        validateAdmin(loggedInUser);
+
+        Group group = groupRepository.findById(request.getGroupId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Group not found"));
+
+        if (group.getStatus() != GroupStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Group must be ACTIVE");
+        }
+
+        if (loanRepository.findByGroup_IdAndStatus(group.getId(), LoanStatus.ACTIVE).isPresent()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Active loan already exists for this group");
+        }
+
+        // Collection-day validation (no auto-fix)
+        validateCollectionDay(request.getStartDate(), group, "Start date");
+
+        if (request.getEndDate() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
+        }
+        validateCollectionDay(request.getEndDate(), group, "End date");
+
+        // Member resolution
+        List<MemberGroup> allMembers = memberGroupRepository.findByGroup_Id(group.getId());
+        if (allMembers.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Group has no members");
+        }
+
+        List<MemberGroup> memberGroups =
+                memberGroupRepository.findByGroup_IdAndStatus(group.getId(), MemberStatus.ACTIVE);
+
+        if (request.getMemberIds() != null && !request.getMemberIds().isEmpty()) {
+            memberGroups = memberGroups.stream()
+                    .filter(mg -> request.getMemberIds().contains(mg.getMember().getId()))
+                    .collect(Collectors.toList());
+
+            if (memberGroups.size() != request.getMemberIds().size()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Invalid members provided");
+            }
+        }
+
+        if (memberGroups.isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "No ACTIVE members found");
+        }
+
+        // Split principal evenly; first member absorbs rounding remainder
+        double split     = Math.floor((request.getTotalLoanAmount() / memberGroups.size()) * 100.0) / 100.0;
+        double remainder = request.getTotalLoanAmount() - (split * memberGroups.size());
+
+        List<LoanMemberDraftDto> members = new ArrayList<>();
+        boolean first = true;
+        for (MemberGroup mg : memberGroups) {
+            double principal = split;
+            if (first) {
+                principal += remainder;
+                first = false;
+            }
+            members.add(new LoanMemberDraftDto(
+                    mg.getMember().getId(),
+                    mg.getMember().getName(),
+                    Math.round(principal * 100.0) / 100.0
+            ));
+        }
+
+        return new LoanDraftDto(
+                group.getId(),
+                request.getTotalLoanAmount(),
+                request.getInterestRate(),
+                request.getDurationMonths(),
+                request.getStartDate(),
+                request.getEndDate(),
+                members,
+                request.getCharges()
+        );
+    }
+
+    // =========================================================
+    //  PREVIEW SCHEDULE
+    // =========================================================
+
+    public List<LoanSchedulePreviewDto> previewSchedule(LoanDraftDto draft, String loggedInUser) {
+        validateAdmin(loggedInUser);
+
+        Group group = groupRepository.findById(draft.getGroupId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Group not found"));
+
+        // Re-validate on preview (caller may send any draft)
+        validateCollectionDay(draft.getStartDate(), group, "Start date");
+        if (draft.getEndDate() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
+        }
+        validateCollectionDay(draft.getEndDate(), group, "End date");
+
+        int total = getTotalInstallments(group.getCollectionType(), draft.getDurationMonths());
+
+        List<LoanSchedulePreviewDto> list = new ArrayList<>();
+
+        for (LoanMemberDraftDto m : draft.getMembers()) {
+
+            double totalInterest =
+                    (m.getPrincipalAmount() * draft.getInterestRate() / 100.0) *
+                    (draft.getDurationMonths() / 12.0);
+            totalInterest = round(totalInterest);
+
+            // Floor-based even split; last installment absorbs rounding
+            double pEach = Math.floor((m.getPrincipalAmount() / total) * 100) / 100;
+            double iEach = Math.floor((totalInterest / total) * 100) / 100;
+
+            double pRem = round(m.getPrincipalAmount() - (pEach * total));
+            double iRem = round(totalInterest - (iEach * total));
+
+            // Installment 1 due = startDate; subsequent installments advance by one interval
+            LocalDate date = draft.getStartDate();
+
+            for (int i = 1; i <= total; i++) {
+                double p  = pEach;
+                double in = iEach;
+
+                if (i == total) {
+                    p  += pRem;
+                    in += iRem;
+                }
+
+                p  = round(p);
+                in = round(in);
+
+                list.add(new LoanSchedulePreviewDto(
+                        m.getMemberId(),
+                        i,
+                        date,
+                        p,
+                        in,
+                        round(p + in)
+                ));
+
+                date = advanceDate(date, group.getCollectionType()); // advance AFTER
+            }
+        }
+
+        return list;
+    }
+
+    // =========================================================
+    //  CONFIRM LOAN
+    // =========================================================
+
+    @Transactional
+    public String confirmLoan(LoanConfirmRequest request, String loggedInUser) {
+        validateAdmin(loggedInUser);
+
+        LoanDraftDto draft = request.getDraft();
+
+        Group group = groupRepository.findById(draft.getGroupId())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Group not found"));
+
+        if (group.getStatus() != GroupStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Group must be ACTIVE");
+        }
+
+        if (loanRepository.findByGroup_IdAndStatus(group.getId(), LoanStatus.ACTIVE).isPresent()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Active loan already exists");
+        }
+
+        // Final validation gate before any persistence
+        validateCollectionDay(draft.getStartDate(), group, "Start date");
+        if (draft.getEndDate() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
+        }
+        validateCollectionDay(draft.getEndDate(), group, "End date");
+
+        // Schedule amount validations
+        double totalCheck = 0;
+        for (LoanMemberDraftDto m : draft.getMembers()) {
+
+            List<LoanSchedulePreviewDto> memberSchedules = request.getSchedules().stream()
+                    .filter(s -> s.getMemberId().equals(m.getMemberId()))
+                    .toList();
+
+            // Principal sum must match declared principal
+            double principalSum = round(
+                    memberSchedules.stream().mapToDouble(LoanSchedulePreviewDto::getPrincipal).sum()
+            );
+            if (Math.abs(principalSum - m.getPrincipalAmount()) > 0.01) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Principal mismatch for member " + m.getMemberName());
+            }
+
+            // Total obligation must NOT be reduced
+            double interestTotal = round(
+                    (m.getPrincipalAmount() * draft.getInterestRate() / 100.0)
+                    * (draft.getDurationMonths() / 12.0)
+            );
+            double expectedTotal = round(m.getPrincipalAmount() + interestTotal);
+            double actualTotal   = round(
+                    memberSchedules.stream().mapToDouble(LoanSchedulePreviewDto::getTotal).sum()
+            );
+            validateScheduleTotals(expectedTotal, actualTotal, m.getMemberName());
+
+            totalCheck += m.getPrincipalAmount();
+        }
+
+        if (Math.abs(round(totalCheck) - draft.getTotalLoanAmount()) > 0.01) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Total loan mismatch");
+        }
+
+        // Persist Loan
+        Loan loan = new Loan();
+        loan.setGroup(group);
+        loan.setInterestRate(draft.getInterestRate());
+        loan.setDurationMonths(draft.getDurationMonths());
+        loan.setStartDate(draft.getStartDate());
+        loan.setEndDate(draft.getEndDate());
+        loan.setStatus(LoanStatus.ACTIVE);
+        loan.setCreatedAt(LocalDateTime.now());
+        loan = loanRepository.save(loan);
+
+        // Persist Charges
+        if (draft.getCharges() != null) {
+            LoanCharges c = new LoanCharges();
+            c.setLoan(loan);
+            c.setProcessingFee(draft.getCharges().getProcessingFee());
+            c.setDocumentFee(draft.getCharges().getDocumentFee());
+            c.setInsuranceFee(draft.getCharges().getInsuranceFee());
+            c.setSavingAmount(draft.getCharges().getSavingAmount());
+            loanChargesRepository.save(c);
+        }
+
+        // Persist Members + Schedules
+        List<LoanSchedule> all = new ArrayList<>();
+
+        for (LoanMemberDraftDto m : draft.getMembers()) {
+
+            Member member = memberGroupRepository
+                    .findByGroup_IdAndStatus(group.getId(), MemberStatus.ACTIVE)
+                    .stream()
+                    .map(MemberGroup::getMember)
+                    .filter(x -> x.getId().equals(m.getMemberId()))
+                    .findFirst()
+                    .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Invalid member"));
+
+            LoanMember lm = new LoanMember();
+            lm.setLoan(loan);
+            lm.setMember(member);
+            lm.setPrincipalAmount(m.getPrincipalAmount());
+            lm.setJoinedDate(draft.getStartDate());
+            lm = loanMemberRepository.save(lm);
+
+            for (LoanSchedulePreviewDto s : request.getSchedules()) {
+                if (s.getMemberId().equals(m.getMemberId())) {
+                    LoanSchedule sc = new LoanSchedule();
+                    sc.setLoanMember(lm);
+                    sc.setInstallmentNo(s.getInstallmentNo());
+                    sc.setDueDate(s.getDueDate());
+                    sc.setPrincipal(s.getPrincipal());
+                    sc.setInterest(s.getInterest());
+                    sc.setTotal(s.getTotal());
+                    sc.setPaidAmount(0.0);
+                    sc.setStatus(PaymentStatus.PENDING);
+                    all.add(sc);
+                }
+            }
+        }
+
+        loanScheduleRepository.saveAll(all);
+        return "Loan created ID: " + loan.getId();
+    }
+
+    // =========================================================
+    //  EDIT LOAN  (Rule §6)
+    // =========================================================
+
+    /**
+     * Updates Loan status and LoanCharges.
+     *
+     * Rules:
+     *  1. ADMIN only.
+     *  2. Loan must exist.
+     *  3. DO NOT allow changing: interestRate, durationMonths, startDate, endDate.
+     *     ONLY allow updating: loan.status and loan charges.
+     *  4. Allowed to edit charges even if schedule payments exist.
+     */
+    @Transactional
+    public String editLoan(Long loanId, EditLoanRequest request, String loggedInUser) {
+        validateAdmin(loggedInUser);
+
+        Loan loan = loanRepository.findById(loanId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found"));
+
+        // Only allow status update
+        if (request.getStatus() != null) {
+            loan.setStatus(request.getStatus());
+        }
+        loanRepository.save(loan);
+
+        // Update charges
+        if (request.getCharges() != null) {
+            LoanCharges charges = loanChargesRepository.findByLoan_Id(loanId)
+                    .orElseGet(() -> {
+                        LoanCharges c = new LoanCharges();
+                        c.setLoan(loan);
+                        return c;
+                    });
+            LoanChargesDto dto = request.getCharges();
+            if (dto.getProcessingFee() != null) charges.setProcessingFee(dto.getProcessingFee());
+            if (dto.getDocumentFee()   != null) charges.setDocumentFee(dto.getDocumentFee());
+            if (dto.getInsuranceFee()  != null) charges.setInsuranceFee(dto.getInsuranceFee());
+            if (dto.getSavingAmount()  != null) charges.setSavingAmount(dto.getSavingAmount());
+            loanChargesRepository.save(charges);
+        }
+
+        return "Loan updated successfully. ID: " + loanId;
+    }
+
+    // =========================================================
+    //  CHARGE PAYMENTS
+    // =========================================================
+
+    @Transactional
+    public String payCharge(Long loanId, ChargePaymentRequest request, String loggedInUser) {
+        User user = validateStaffOrAdmin(loggedInUser);
+
+        Loan loan = loanRepository.findById(loanId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found"));
+
+        boolean isAdmin = user.getRole() == UserRole.ADMIN;
+        boolean isCollector = loan.getGroup().getCollectionStaff().getUsername().equals(loggedInUser);
+
+        if (!isAdmin && !isCollector) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "You are not authorized to collect for this group");
+        }
+
+        LoanMember lm = loanMemberRepository.findByLoan_IdAndMember_Id(loanId, request.getMemberId())
+                .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Member must belong to loan"));
+
+        if (loanChargePaymentRepository.existsByLoan_IdAndMember_Id(loanId, request.getMemberId())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Member has already paid the charge");
+        }
+
+        if (request.getAmountPaid() == null || request.getAmountPaid() <= 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be greater than 0");
+        }
+
+        LoanChargePayment payment = new LoanChargePayment();
+        payment.setLoan(loan);
+        payment.setMember(lm.getMember());
+        payment.setAmountPaid(request.getAmountPaid());
+        payment.setPaymentDate(LocalDate.now());
+        payment.setCreatedAt(LocalDateTime.now());
+        loanChargePaymentRepository.save(payment);
+
+        return "Payment successful";
+    }
+
+    public ChargeStatusResponse getChargeStatus(Long loanId) {
+        if (!loanRepository.existsById(loanId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "Loan not found");
+        }
+
+        List<LoanMember> loanMembers = loanMemberRepository.findByLoan_Id(loanId);
+        int totalMembers = loanMembers.size();
+
+        List<LoanChargePayment> payments = loanChargePaymentRepository.findByLoan_Id(loanId);
+        int paidMembers = payments.size();
+
+        String status = "UNPAID";
+        if (paidMembers > 0) {
+            if (paidMembers >= totalMembers) {
+                status = "PAID";
+            } else {
+                status = "PARTIAL";
+            }
+        }
+
+        return new ChargeStatusResponse(totalMembers, paidMembers, status);
+    }
+
+    public List<ChargePaymentMemberDto> getMembersWhoPaid(Long loanId) {
+        if (!loanRepository.existsById(loanId)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "Loan not found");
+        }
+
+        List<LoanChargePayment> payments = loanChargePaymentRepository.findByLoan_Id(loanId);
+        return payments.stream().map(p -> new ChargePaymentMemberDto(
+                p.getMember().getId(),
+                p.getMember().getName(),
+                p.getAmountPaid(),
+                p.getPaymentDate()
+        )).collect(Collectors.toList());
+    }
+
+    // =========================================================
+    //  ADD MEMBER: PREVIEW
+    // =========================================================
+
+    public AddMemberPreviewResponse previewAddMember(Long loanId, Long memberId, String loggedInUser) {
+        validateAdmin(loggedInUser);
+        AddMemberContext ctx = calcAddMemberContext(loanId, memberId);
+        List<AddMemberScheduleDto> schedules = buildScheduleDtos(ctx);
+        return new AddMemberPreviewResponse(
+                loanId,
+                ctx.member().getId(),
+                ctx.member().getName(),
+                ctx.principalAmount(),
+                schedules
+        );
+    }
+
+    // =========================================================
+    //  ADD MEMBER: CONFIRM
+    // =========================================================
+
+    @Transactional
+    public AddMemberResponse confirmAddMember(Long loanId, AddMemberConfirmRequest request, String loggedInUser) {
+        validateAdmin(loggedInUser);
+
+        Long memberId = request.getMemberId();
+        AddMemberContext ctx = calcAddMemberContext(loanId, memberId);
+
+        // Principal validation
+        double sumPrincipal = round(
+                request.getSchedules().stream().mapToDouble(AddMemberScheduleDto::getPrincipal).sum()
+        );
+        if (Math.abs(sumPrincipal - request.getPrincipalAmount()) > 0.01) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Sum of schedule principals (" + sumPrincipal +
+                    ") does not match principalAmount (" + request.getPrincipalAmount() + ")");
+        }
+        if (Math.abs(request.getPrincipalAmount() - ctx.principalAmount()) > 0.01) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "principalAmount must match existing members' principal (" + ctx.principalAmount() + ")");
+        }
+
+        // Installment count validation
+        if (request.getSchedules().size() != ctx.remaining()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Schedule must have exactly " + ctx.remaining() +
+                    " installments (remaining), got " + request.getSchedules().size());
+        }
+
+        // Sort + continuity validation
+        int expectedStart = ctx.passedInstallments() + 1;
+        List<AddMemberScheduleDto> sorted = request.getSchedules().stream()
+                .sorted(java.util.Comparator.comparingInt(AddMemberScheduleDto::getInstallmentNo))
+                .collect(Collectors.toList());
+
+        for (int i = 0; i < sorted.size(); i++) {
+            int expected = expectedStart + i;
+            if (sorted.get(i).getInstallmentNo() != expected) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Installment numbers must be continuous starting from " + expectedStart +
+                        ". Got " + sorted.get(i).getInstallmentNo() + " at position " + (i + 1));
+            }
+        }
+
+        // Per-installment value validation
+        for (AddMemberScheduleDto s : sorted) {
+            if (s.getPrincipal() < 0 || s.getInterest() < 0 || s.getTotal() < 0) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Installment " + s.getInstallmentNo() + " contains negative values");
+            }
+            double expTotal = round(s.getPrincipal() + s.getInterest());
+            if (Math.abs(expTotal - s.getTotal()) > 0.01) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Installment " + s.getInstallmentNo() +
+                        ": total must equal principal + interest (" + expTotal + ")");
+            }
+        }
+
+        // Total obligation must NOT be reduced
+        double interestTotal = round(
+                (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
+                * (ctx.loan().getDurationMonths() / 12.0)
+        );
+        double expectedTotal = round(ctx.principalAmount() + interestTotal);
+        double actualTotal   = round(
+                sorted.stream().mapToDouble(AddMemberScheduleDto::getTotal).sum()
+        );
+        validateScheduleTotals(expectedTotal, actualTotal, ctx.member().getName());
+
+        // Persist
+        LoanMember lm = new LoanMember();
+        lm.setLoan(ctx.loan());
+        lm.setMember(ctx.member());
+        lm.setPrincipalAmount(ctx.principalAmount());
+        lm.setJoinedDate(LocalDate.now());
+        lm = loanMemberRepository.save(lm);
+
+        final LoanMember savedLm = lm;
+        List<LoanSchedule> schedules = sorted.stream().map(s -> {
+            LoanSchedule sc = new LoanSchedule();
+            sc.setLoanMember(savedLm);
+            sc.setInstallmentNo(s.getInstallmentNo());
+            sc.setDueDate(s.getDueDate());
+            sc.setPrincipal(s.getPrincipal());
+            sc.setInterest(s.getInterest());
+            sc.setTotal(s.getTotal());
+            sc.setPaidAmount(0.0);
+            sc.setStatus(PaymentStatus.PENDING);
+            return sc;
+        }).collect(Collectors.toList());
+
+        loanScheduleRepository.saveAll(schedules);
+        return new AddMemberResponse("Member added successfully", savedLm.getId());
+    }
+
+    // =========================================================
+    //  GET LOAN SUMMARY BY GROUP
+    // =========================================================
+
+    public List<LoanSummaryResponse> getLoanSummaryByGroup(Long groupId, Long loanId) {
+        List<Loan> loans;
+        if (loanId != null) {
+            loans = List.of(loanRepository.findById(loanId)
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found")));
+            if (groupId != null && !loans.get(0).getGroup().getId().equals(groupId)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Loan does not belong to this group");
+            }
+        } else if (groupId != null) {
+            loans = loanRepository.findByGroup_Id(groupId);
+        } else {
+            loans = loanRepository.findAll();
+        }
+
+        List<LoanSummaryResponse> summaryList = new ArrayList<>();
+
+        for (Loan loan : loans) {
+            List<LoanMember> loanMembers = loanMemberRepository.findByLoan_Id(loan.getId());
+            double totalPrincipal = loanMembers.stream()
+                    .mapToDouble(LoanMember::getPrincipalAmount)
+                    .sum();
+
+            LoanSummaryResponse summary = new LoanSummaryResponse();
+            summary.setId(loan.getId());
+            summary.setGroupId(loan.getGroup().getId());
+            summary.setGroupName(loan.getGroup().getGroupName());
+            summary.setTotalMembers(loanMembers.size());
+            summary.setTotalPrincipal(round(totalPrincipal));
+            summary.setInterestRate(loan.getInterestRate());
+            summary.setDurationMonths(loan.getDurationMonths());
+            summary.setCollectionType(loan.getGroup().getCollectionType().name());
+            summary.setStatus(loan.getStatus().name());
+
+            ChargeStatusResponse chargeRes = getChargeStatus(loan.getId());
+            summary.setChargeStatus(chargeRes.getStatus());
+
+            loanChargesRepository.findByLoan_Id(loan.getId()).ifPresent(c -> {
+                summary.setCharges(new com.microfinance.loanapp.dto.LoanChargesDto(
+                        c.getProcessingFee(),
+                        c.getDocumentFee(),
+                        c.getInsuranceFee(),
+                        c.getSavingAmount()
+                ));
+            });
+
+            summaryList.add(summary);
+        }
+
+        return summaryList;
+    }
+
+    // =========================================================
+    //  GET LOAN SCHEDULE BY GROUP
+    // =========================================================
+
+    public List<LoanScheduleGroupResponse> getLoanScheduleByGroup(Long groupId, Long loanId) {
+        Loan loan = loanRepository.findById(loanId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found"));
+
+        if (!loan.getGroup().getId().equals(groupId)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Loan does not belong to this group");
+        }
+
+        List<LoanScheduleGroupResponse> result = new ArrayList<>();
+        List<LoanMember> members = loanMemberRepository.findByLoan_Id(loan.getId());
+        if (members.isEmpty()) return result;
+
+        int maxInstallment = loanScheduleRepository
+                .findTopByLoanMember_Loan_IdOrderByInstallmentNoDesc(loan.getId())
+                .map(LoanSchedule::getInstallmentNo)
+                .orElse(0);
+
+        for (int i = 1; i <= maxInstallment; i++) {
+            List<MemberScheduleDto> list = new ArrayList<>();
+            LocalDate dueDate = null;
+
+            for (LoanMember lm : members) {
+                java.util.Optional<LoanSchedule> opt =
+                        loanScheduleRepository.findByLoanMember_IdAndInstallmentNo(lm.getId(), i);
+                if (opt.isEmpty()) continue;
+
+                LoanSchedule s = opt.get();
+                if (dueDate == null) dueDate = s.getDueDate();
+
+                MemberScheduleDto dto = new MemberScheduleDto();
+                dto.setLoanScheduleId(s.getId());
+                dto.setMemberId(lm.getMember().getId());
+                dto.setMemberName(lm.getMember().getName());
+                dto.setPrincipal(s.getPrincipal());
+                dto.setInterest(s.getInterest());
+                dto.setTotal(s.getTotal());
+                dto.setPaidAmount(s.getPaidAmount());
+                dto.setStatus(s.getStatus().name());
+                list.add(dto);
+            }
+
+            if (list.isEmpty()) continue;
+
+            LoanScheduleGroupResponse res = new LoanScheduleGroupResponse();
+            res.setLoanId(loan.getId());
+            res.setInstallmentNo(i);
+            res.setDueDate(dueDate != null ? dueDate.toString() : "");
+            res.setMembers(list);
+            result.add(res);
+        }
+        return result;
+    }
+
+    // =========================================================
+    //  GET SCHEDULE BY MEMBER
+    // =========================================================
+
+    public List<MemberScheduleDto> getScheduleByMember(Long groupId, Long loanId, Long memberId) {
+        LoanMember lm = loanMemberRepository.findByLoan_IdAndMember_Id(loanId, memberId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Schedules not found for this member and loan"));
+
+        if (!lm.getLoan().getGroup().getId().equals(groupId)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Member/Loan does not belong to this group");
+        }
+
+        List<MemberScheduleDto> result = new ArrayList<>();
+        List<LoanSchedule> schedules =
+                loanScheduleRepository.findByLoanMember_IdOrderByInstallmentNo(lm.getId());
+
+        for (LoanSchedule s : schedules) {
+            MemberScheduleDto dto = new MemberScheduleDto();
+            dto.setLoanScheduleId(s.getId());
+            dto.setMemberId(memberId);
+            dto.setMemberName(lm.getMember().getName());
+            dto.setPrincipal(s.getPrincipal());
+            dto.setInterest(s.getInterest());
+            dto.setTotal(s.getTotal());
+            dto.setInstallmentNo(s.getInstallmentNo());
+            dto.setDueDate(s.getDueDate() != null ? s.getDueDate().toString() : "");
+            dto.setPaidAmount(s.getPaidAmount());
+            dto.setStatus(s.getStatus().name());
+            result.add(dto);
+        }
+        return result;
+    }
+
+    // =========================================================
+    //  EDIT SCHEDULE (per-installment override)
+    // =========================================================
+
+    @Transactional
+    public String editSchedule(EditLoanScheduleRequest request, String username) {
+        validateAdmin(username);
+
+        List<LoanSchedule> schedules = loanScheduleRepository
+                .findByLoanMember_Loan_IdAndInstallmentNo(
+                        request.getLoanId(),
+                        request.getInstallmentNo()
+                );
+
+        if (schedules.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "No schedules found");
+        }
+
+        // Block if any installment in this batch has been paid
+        boolean anyPaid = schedules.stream()
+                .anyMatch(s -> s.getPaidAmount() != null && s.getPaidAmount() > 0);
+        if (anyPaid) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Cannot edit. Some members already paid.");
+        }
+
+        if (schedules.size() != request.getMembers().size()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Mismatch in members");
+        }
+
+        // Validate individual totals
+        for (MemberScheduleEditDto dto : request.getMembers()) {
+            double expectedTotal = round(dto.getPrincipal() + dto.getInterest());
+            if (Math.abs(expectedTotal - dto.getTotal()) > 0.01) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Total mismatch for schedule " + dto.getLoanScheduleId());
+            }
+        }
+
+        // Total obligation check per member across all installments
+        List<LoanMember> loanMembers = loanMemberRepository.findByLoan_Id(request.getLoanId());
+        for (LoanMember lm : loanMembers) {
+
+            List<LoanSchedule> allSchedules =
+                    loanScheduleRepository.findByLoanMember_Id(lm.getId());
+
+            double originalTotal = round(
+                    allSchedules.stream().mapToDouble(LoanSchedule::getTotal).sum()
+            );
+
+            double newTotal = 0;
+            for (LoanSchedule s : allSchedules) {
+                MemberScheduleEditDto edited = request.getMembers().stream()
+                        .filter(x -> x.getLoanScheduleId().equals(s.getId()))
+                        .findFirst()
+                        .orElse(null);
+                newTotal += (edited != null) ? edited.getTotal() : s.getTotal();
+            }
+            newTotal = round(newTotal);
+
+            validateScheduleTotals(originalTotal, newTotal, lm.getMember().getName());
+        }
+
+        // Apply updates
+        for (MemberScheduleEditDto dto : request.getMembers()) {
+            LoanSchedule s = schedules.stream()
+                    .filter(x -> x.getId().equals(dto.getLoanScheduleId()))
+                    .findFirst()
+                    .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Invalid schedule"));
+            s.setPrincipal(dto.getPrincipal());
+            s.setInterest(dto.getInterest());
+            s.setTotal(dto.getTotal());
+        }
+
+        loanScheduleRepository.saveAll(schedules);
+        return "Schedule updated successfully";
+    }
+
+    @Transactional
+    public String editMemberSchedule(EditMemberScheduleRequest request, String username) {
+        validateAdmin(username);
+
+        List<LoanMember> loanMemberOpt = loanMemberRepository.findByLoan_IdAndMember_Id(request.getLoanId(), request.getMemberId())
+                .map(List::of).orElse(List.of());
+
+        if (loanMemberOpt.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "Loan member record not found");
+        }
+        LoanMember lm = loanMemberOpt.get(0);
+
+        List<LoanSchedule> schedules = loanScheduleRepository.findByLoanMember_IdOrderByInstallmentNo(lm.getId());
+        if (schedules.isEmpty()) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "No schedules found for this member");
+        }
+
+        if (schedules.size() != request.getSchedules().size()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Mismatch in installment count");
+        }
+
+        // Total principal integrity check: Sum of NEW principals (including locked paid ones) 
+        // must match the ORIGINAL LoanMember principal amount.
+        double originalPrincipal = lm.getPrincipalAmount();
+        double newPrincipalSum = round(
+                request.getSchedules().stream().mapToDouble(MemberScheduleDto::getPrincipal).sum()
+        );
+
+        if (Math.abs(originalPrincipal - newPrincipalSum) > 0.01) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, 
+                "Total principal mismatch. Original: " + originalPrincipal + ", New Sum: " + newPrincipalSum);
+        }
+
+        // Apply updates
+        for (MemberScheduleDto dto : request.getSchedules()) {
+            LoanSchedule s = schedules.stream()
+                    .filter(x -> x.getId().equals(dto.getLoanScheduleId()))
+                    .findFirst()
+                    .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Invalid schedule ID: " + dto.getLoanScheduleId()));
+
+            // Only allow editing if NOT PAID or PARTIAL
+            if (s.getPaidAmount() != null && s.getPaidAmount() > 0) {
+                // If any value differs from the DB, throw error
+                boolean principalChanged = Math.abs(s.getPrincipal() - dto.getPrincipal()) > 0.01;
+                boolean interestChanged = Math.abs(s.getInterest() - dto.getInterest()) > 0.01;
+                boolean dueDateChanged = (dto.getDueDate() != null && !s.getDueDate().toString().equals(dto.getDueDate()));
+
+                if (principalChanged || interestChanged || dueDateChanged) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Cannot edit installment #" + s.getInstallmentNo() + " as it has payments.");
+                }
+                continue; // Skip update for this row
+            }
+
+            s.setPrincipal(round(dto.getPrincipal()));
+            s.setInterest(round(dto.getInterest()));
+            s.setTotal(round(dto.getPrincipal() + dto.getInterest()));
+            
+            if (dto.getDueDate() != null && !dto.getDueDate().isEmpty()) {
+                s.setDueDate(LocalDate.parse(dto.getDueDate()));
+            }
+        }
+
+        loanScheduleRepository.saveAll(schedules);
+        return "Member schedule updated successfully";
+    }
+
+    // =========================================================
+    //  SHARED ADD-MEMBER CONTEXT  (no DB writes)
+    // =========================================================
+
+    private record AddMemberContext(
+            Loan loan,
+            Member member,
+            double principalAmount,
+            int totalInstallments,
+            int passedInstallments,
+            int remaining,
+            CollectionType collectionType
+    ) {}
+
+    private AddMemberContext calcAddMemberContext(Long loanId, Long memberId) {
+
+        Loan loan = loanRepository.findById(loanId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found"));
+
+        if (loan.getStatus() != LoanStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Loan must be ACTIVE");
+        }
+
+        Group group = loan.getGroup();
+        if (group.getStatus() != GroupStatus.ACTIVE) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Group must be ACTIVE");
+        }
+
+        // Member must belong to the group and be ACTIVE
+        Member member = memberGroupRepository
+                .findByGroup_IdAndStatus(group.getId(), MemberStatus.ACTIVE)
+                .stream()
+                .map(MemberGroup::getMember)
+                .filter(m -> m.getId().equals(memberId))
+                .findFirst()
+                .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST,
+                        "Member not found in group or not ACTIVE"));
+
+        // Member must NOT already be in this loan
+        if (loanMemberRepository.findByLoan_IdAndMember_Id(loanId, memberId).isPresent()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Member already exists in this loan");
+        }
+
+        CollectionType cType = group.getCollectionType();
+        int total = getTotalInstallments(cType, loan.getDurationMonths());
+
+        // Calculate how many installments have already passed
+        // Installment 1 = startDate. If startDate is before today, it's passed.
+        int passedInstallments = 0;
+        LocalDate d = loan.getStartDate();
+        LocalDate today = LocalDate.now();
+        while (passedInstallments < total && d.isBefore(today)) {
+            passedInstallments++;
+            d = advanceDate(d, cType);
+        }
+
+        int remaining = total - passedInstallments;
+
+        if (remaining <= 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Loan duration already completed — no installments remain");
+        }
+
+        // Use principalAmount from any existing LoanMember
+        List<LoanMember> existingMembers = loanMemberRepository.findByLoan_Id(loanId);
+        if (existingMembers.isEmpty()) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "No existing members found for loan");
+        }
+        double principalAmount = existingMembers.get(0).getPrincipalAmount();
+
+        return new AddMemberContext(loan, member, principalAmount, total, passedInstallments, remaining, cType);
+    }
+
+    /**
+     * Builds schedule DTOs for a new member joining an active loan.
+     *
+     * Rule §4 — Redistribute interest over REMAINING installments (not total).
+     *   totalInterest = principal × rate × (fullDuration / 12)  (full duration, not reduced)
+     *   pEach = principal / remaining
+     *   iEach = totalInterest / remaining
+     *
+     * Rule §5 — Due dates must match the exact cycle of existing members.
+     *   Start from loan.startDate, skip 'passed' intervals, then generate remaining.
+     *   Next-due date for new member = startDate + (passed+1) × interval
+     */
+    private List<AddMemberScheduleDto> buildScheduleDtos(AddMemberContext ctx) {
+
+        // Full-duration interest; redistributed over remaining installments (Rule §4.2, §4.4)
+        double totalInterest = round(
+                (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
+                * (ctx.loan().getDurationMonths() / 12.0)
+        );
+
+        double pEach = Math.floor((ctx.principalAmount() / ctx.remaining()) * 100.0) / 100.0;
+        double iEach = Math.floor((totalInterest / ctx.remaining()) * 100.0) / 100.0;
+
+        double pRem = round(ctx.principalAmount() - (pEach * ctx.remaining()));
+        double iRem = round(totalInterest - (iEach * ctx.remaining()));
+
+        // Rule §5: start from loan.startDate, skip passed intervals
+        LocalDate date = ctx.loan().getStartDate();
+        for (int skip = 0; skip < ctx.passedInstallments(); skip++) {
+            date = advanceDate(date, ctx.collectionType());
+        }
+
+        List<AddMemberScheduleDto> result = new ArrayList<>();
+        int installmentCounter = 0;
+
+        for (int i = ctx.passedInstallments() + 1; i <= ctx.totalInstallments(); i++) {
+            installmentCounter++;
+
+            boolean isLast = (installmentCounter == ctx.remaining());
+            double p  = isLast ? round(pEach + pRem) : round(pEach);
+            double in = isLast ? round(iEach + iRem) : round(iEach);
+
+            result.add(new AddMemberScheduleDto(i, date, p, in, round(p + in)));
+
+            date = advanceDate(date, ctx.collectionType()); // advance AFTER
+        }
+
+        return result;
+    }
+
+    // =========================================================
+    //  HELPERS
+    // =========================================================
+
+    private int getTotalInstallments(CollectionType type, int months) {
+        return switch (type) {
+            case DAILY    -> months * 30;
+            case WEEKLY   -> months * 4;
+            case BIWEEKLY -> months * 2;
+            case MONTHLY  -> months;
+        };
+    }
+
+    private LocalDate advanceDate(LocalDate d, CollectionType t) {
+        return switch (t) {
+            case DAILY    -> d.plusDays(1);
+            case WEEKLY   -> d.plusDays(7);
+            case BIWEEKLY -> d.plusDays(14);
+            case MONTHLY  -> d.plusMonths(1);
+        };
+    }
+
+    private double round(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    /**
+     * Asserts actualTotal == expectedTotal (within ₹0.01 tolerance).
+     * Throws a descriptive error if the total would be reduced OR inflated.
+     */
+    private void validateScheduleTotals(double expectedTotal, double actualTotal, String memberName) {
+        double diff = round(actualTotal - expectedTotal);
+        if (Math.abs(diff) > 0.01) {
+            if (diff < 0) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Total for member " + memberName + " is LESS by ₹" + Math.abs(diff));
+            } else {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "Total for member " + memberName + " is GREATER by ₹" + diff);
+            }
+        }
+    }
+
+    public boolean hasActiveLoan(Long memberId) {
+        return loanMemberRepository.existsByMember_IdAndLoan_Status(memberId, LoanStatus.ACTIVE);
+    }
+}

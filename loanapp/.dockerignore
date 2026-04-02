@@ -1,0 +1,25 @@
+# Secrets - NEVER bake into the image
+.env
+
+# Build artifacts (rebuilt inside Docker)
+target/
+
+# Logs
+*.log
+run.log
+
+# Uploads (runtime data, not source)
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes

@@ -20,6 +20,9 @@ public interface ReportLoanMemberRepository extends JpaRepository<LoanMember, Lo
     @Query("SELECT COALESCE(SUM(lm.principalAmount), 0) FROM LoanMember lm WHERE lm.loan.group.id = :groupId")
     Double sumDisbursedByGroup(@Param("groupId") Long groupId);
 
+    @Query("SELECT COALESCE(SUM(lm.principalAmount), 0) FROM LoanMember lm WHERE (:groupId IS NULL OR lm.loan.group.id = :groupId) AND (:status IS NULL OR lm.loan.status = :status)")
+    Double sumDisbursedWithFilters(@Param("groupId") Long groupId, @Param("status") com.microfinance.loanapp.enums.LoanStatus status);
+
     // Group report: distinct member count for a group (across all loans)
     @Query("SELECT COUNT(DISTINCT lm.member.id) FROM LoanMember lm WHERE lm.loan.group.id = :groupId")
     Integer countDistinctMembersByGroup(@Param("groupId") Long groupId);
@@ -36,4 +39,10 @@ public interface ReportLoanMemberRepository extends JpaRepository<LoanMember, Lo
     @Query("SELECT COALESCE(SUM(lm.principalAmount), 0) FROM LoanMember lm " +
            "WHERE lm.joinedDate >= :from AND lm.joinedDate <= :to")
     Double sumDisbursedInPeriod(@Param("from") LocalDate from, @Param("to") LocalDate to);
+
+    @Query("SELECT COALESCE(SUM(lm.principalAmount), 0.0) FROM LoanMember lm WHERE lm.loan.createdAt < :date AND (:groupId IS NULL OR lm.loan.group.id = :groupId)")
+    Double sumDisbursedBefore(@Param("date") java.time.LocalDateTime date, @Param("groupId") Long groupId);
+
+    @Query("SELECT COALESCE(SUM(lm.principalAmount), 0.0) FROM LoanMember lm WHERE lm.loan.createdAt >= :startDate AND lm.loan.createdAt <= :endDate AND (:groupId IS NULL OR lm.loan.group.id = :groupId)")
+    Double sumDisbursedBetween(@Param("startDate") java.time.LocalDateTime startDate, @Param("endDate") java.time.LocalDateTime endDate, @Param("groupId") Long groupId);
 }

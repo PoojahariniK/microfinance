@@ -15,7 +15,6 @@ public class LoanInitRequest {
     private Double interestRate;
     private Integer durationMonths;
     private LocalDate startDate;
-    private LocalDate endDate;
     private List<Long> memberIds;
     private LoanChargesDto charges;
 }

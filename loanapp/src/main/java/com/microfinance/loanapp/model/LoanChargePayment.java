@@ -30,6 +30,9 @@ public class LoanChargePayment {
     private Double amountPaid;
 
     @Column(nullable = false)
+    private Double totalAmount;
+
+    @Column(nullable = false)
     private LocalDate paymentDate;
 
     @Column(nullable = false)

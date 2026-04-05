@@ -20,6 +20,22 @@ public interface ReportScheduleRepository extends JpaRepository<LoanSchedule, Lo
     @Query("SELECT COALESCE(SUM(s.interest), 0) FROM LoanSchedule s WHERE s.status = 'PAID'")
     Double sumInterestCollected();
 
+    @Query("SELECT COALESCE(SUM(s.interest), 0) FROM LoanSchedule s WHERE s.status = 'PAID' " +
+           "AND (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId) " +
+           "AND (:status IS NULL OR s.loanMember.loan.status = :status)")
+    Double sumInterestWithFilters(@Param("groupId") Long groupId, @Param("status") com.microfinance.loanapp.enums.LoanStatus status);
+
+    @Query("SELECT COALESCE(SUM(s.interest), 0) FROM LoanSchedule s " +
+           "WHERE (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId) " +
+           "AND (:status IS NULL OR s.loanMember.loan.status = :status)")
+    Double sumTotalInterestExpectedWithFilters(@Param("groupId") Long groupId, @Param("status") com.microfinance.loanapp.enums.LoanStatus status);
+
+    @Query("SELECT COALESCE(SUM(s.total - COALESCE(s.paidAmount, 0)), 0) FROM LoanSchedule s " +
+           "WHERE s.status <> 'PAID' " +
+           "AND (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId) " +
+           "AND (:status IS NULL OR s.loanMember.loan.status = :status)")
+    Double sumPendingWithFilters(@Param("groupId") Long groupId, @Param("status") com.microfinance.loanapp.enums.LoanStatus status);
+
     // Due-wise: schedules for a specific dueDate with members/groups fetched
     @Query("SELECT s FROM LoanSchedule s " +
            "JOIN FETCH s.loanMember lm " +
@@ -72,4 +88,32 @@ public interface ReportScheduleRepository extends JpaRepository<LoanSchedule, Lo
     // PnL: pending = sum(total - paidAmount) for unpaid
     @Query("SELECT COALESCE(SUM(s.total - COALESCE(s.paidAmount, 0)), 0) FROM LoanSchedule s WHERE s.status <> 'PAID'")
     Double sumTotalPending();
+    
+    // Installment filter for reports: unique numbers for a loan
+    @Query("SELECT DISTINCT s.installmentNo FROM LoanSchedule s WHERE s.loanMember.loan.id = :loanId ORDER BY s.installmentNo ASC")
+    List<Integer> findDistinctInstallmentNumbersByLoanId(@Param("loanId") Long loanId);
+    
+    // Group dues: unique due dates for a group
+    @Query("SELECT DISTINCT s.dueDate FROM LoanSchedule s WHERE s.loanMember.loan.group.id = :groupId ORDER BY s.dueDate ASC")
+    List<LocalDate> findDistinctDueDatesByGroupId(@Param("groupId") Long groupId);
+
+    // Full search: fetch all for a loan with all joins
+    @Query("SELECT s FROM LoanSchedule s " +
+           "JOIN FETCH s.loanMember lm " +
+           "JOIN FETCH lm.member m " +
+           "JOIN FETCH lm.loan l " +
+           "WHERE l.id = :loanId")
+    List<LoanSchedule> findByLoanIdWithDetails(@Param("loanId") Long loanId);
+
+    @Query("SELECT COALESCE(SUM(s.total - COALESCE(s.paidAmount, 0.0)), 0.0) FROM LoanSchedule s WHERE s.dueDate < :date AND (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId)")
+    Double sumOutstandingBefore(@Param("date") LocalDate date, @Param("groupId") Long groupId);
+
+    @Query("SELECT COALESCE(SUM(s.total - COALESCE(s.paidAmount, 0.0)), 0.0) FROM LoanSchedule s WHERE s.dueDate <= :date AND (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId)")
+    Double sumOutstandingTill(@Param("date") LocalDate date, @Param("groupId") Long groupId);
+
+    // True total pending: ALL unpaid amounts across all schedules (regardless of due date)
+    // This is the correct "Loan Outstanding" for Balance Sheet — matches Loan Performance "Total Pending"
+    @Query("SELECT COALESCE(SUM(s.total - COALESCE(s.paidAmount, 0.0)), 0.0) FROM LoanSchedule s " +
+           "WHERE s.status <> 'PAID' AND (:groupId IS NULL OR s.loanMember.loan.group.id = :groupId)")
+    Double sumTrueTotalPending(@Param("groupId") Long groupId);
 }

@@ -4,8 +4,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Plus, Search, Edit, Eye, User, Image as ImageIcon, Users, AlertTriangle, Calendar, Phone, MapPin, Briefcase, Landmark, UserPlus } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Plus, Search, Edit, Eye, User, Image as ImageIcon, Users, Calendar, Phone, MapPin, Briefcase, Landmark, UserPlus, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { toast } from "sonner";
 
 interface Member {
   id: number;
@@ -50,9 +52,22 @@ export default function Members() {
     name: "", phone: "", address: "", aadhaarNumber: "", 
     dob: "", gender: "MALE", occupation: "",
     bankName: "", accountNumber: "", ifscCode: "",
-    nomineeName: "", nomineeRelation: "", nomineePhone: ""
+    nomineeName: "", nomineeRelation: "", nomineePhone: "",
+    groupId: ""
   });
   const [createFile, setCreateFile] = useState<File | null>(null);
+
+  const resetCreateForm = () => {
+    setCreateForm({
+      name: "", phone: "", address: "", aadhaarNumber: "", 
+      dob: "", gender: "MALE", occupation: "",
+      bankName: "", accountNumber: "", ifscCode: "",
+      nomineeName: "", nomineeRelation: "", nomineePhone: "",
+      groupId: ""
+    });
+    setCreateFile(null);
+    setError("");
+  };
 
   const [editOpen, setEditOpen] = useState(false);
   const [editForm, setEditForm] = useState<any>(null);
@@ -62,6 +77,10 @@ export default function Members() {
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
   const [viewOpen, setViewOpen] = useState(false);
   const [viewData, setViewData] = useState<Member | null>(null);
+  const [confirmAddGroupId, setConfirmAddGroupId] = useState<number | null>(null);
+  const [confirmAddGroupName, setConfirmAddGroupName] = useState<string>("");
+  const [confirmRemoveGroupId, setConfirmRemoveGroupId] = useState<number | null>(null);
+  const [confirmRemoveGroupName, setConfirmRemoveGroupName] = useState<string>("");
   const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const fetchMembers = useCallback(async (groupId?: string) => {
     if (!user) return;
@@ -119,22 +138,28 @@ export default function Members() {
 
   const handleCreateSubmit = async () => {
     if (!createForm.name || !createForm.phone || !createForm.aadhaarNumber) {
-      setError("Name, Phone, and Aadhaar are required.");
+      toast.error("Name, Phone, and Aadhaar are required.");
+      return;
+    }
+
+    if (!createForm.groupId || createForm.groupId === "none") {
+      toast.error("Please assign the member to a group.");
       return;
     }
     
     if (createForm.phone.length !== 10) {
-      setError("Phone number must be exactly 10 digits.");
+      toast.error("Phone number must be exactly 10 digits.");
       return;
     }
 
     if (createForm.aadhaarNumber.length !== 12) {
-      setError("Aadhaar number must be exactly 12 digits.");
+      toast.error("Aadhaar number must be exactly 12 digits.");
       return;
     }
 
     const formData = new FormData();
-    const body = { ...createForm, dob: createForm.dob || null };
+    const { groupId, ...bodyParams } = createForm;
+    const body = { ...bodyParams, dob: createForm.dob || null };
     formData.append("member", new Blob([JSON.stringify(body)], { type: "application/json" }));
     if (createFile) {
       formData.append("file", createFile);
@@ -149,17 +174,29 @@ export default function Members() {
 
       if (!res.ok) throw new Error(await res.text() || "Failed to create member");
       
+      const createdMember = await res.json();
+      
+      if (groupId && groupId !== "none") {
+        try {
+          const groupRes = await fetch(`${API_BASE}/api/members/group/${groupId}/add/${createdMember.id}`, {
+            method: "POST",
+            headers: { "loggedInUser": user!.username },
+          });
+          if (!groupRes.ok) {
+            const msg = await parseApiError(groupRes, "Member created, but failed to assign to group.");
+            toast.error(msg);
+          }
+        } catch (err) {
+          toast.error("Member created, but failed to assign to group.");
+        }
+      }
+
       setCreateOpen(false);
-      setCreateForm({
-        name: "", phone: "", address: "", aadhaarNumber: "", 
-        dob: "", gender: "MALE", occupation: "",
-        bankName: "", accountNumber: "", ifscCode: "",
-        nomineeName: "", nomineeRelation: "", nomineePhone: ""
-      });
-      setCreateFile(null);
+      resetCreateForm();
       fetchMembers(selectedGroupId);
+      toast.success("Member created successfully");
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message);
     }
   };
 
@@ -172,12 +209,12 @@ export default function Members() {
 
   const handleEditSubmit = async () => {
     if (editForm.phone.length !== 10) {
-      setError("Phone number must be exactly 10 digits.");
+      toast.error("Phone number must be exactly 10 digits.");
       return;
     }
 
     if (editForm.aadhaarNumber.length !== 12) {
-      setError("Aadhaar number must be exactly 12 digits.");
+      toast.error("Aadhaar number must be exactly 12 digits.");
       return;
     }
 
@@ -207,28 +244,43 @@ export default function Members() {
       setEditOpen(false);
       fetchMembers(selectedGroupId);
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message);
     }
   };
 
-  const handleAddMemberToGroup = async (groupId: number) => {
-    if (!selectedMember || !user) return;
+  const parseApiError = async (res: Response, fallback: string): Promise<string> => {
+    try {
+      const text = await res.text();
+      try {
+        const obj = JSON.parse(text);
+        return obj.message || fallback;
+      } catch {
+        return text || fallback;
+      }
+    } catch {
+      return fallback;
+    }
+  };
+
+  const handleAddMemberToGroup = (groupId: number, groupName: string) => {
+    setConfirmAddGroupId(groupId);
+    setConfirmAddGroupName(groupName);
+  };
+
+  const doAddMemberToGroup = async () => {
+    if (!selectedMember || !user || confirmAddGroupId === null) return;
+    const groupId = confirmAddGroupId;
+    setConfirmAddGroupId(null);
     try {
       const res = await fetch(`${API_BASE}/api/members/group/${groupId}/add/${selectedMember.id}`, {
         method: "POST",
         headers: { "loggedInUser": user.username },
       });
       if (!res.ok) {
-        const errorText = await res.text();
-        try {
-          const errObj = JSON.parse(errorText);
-          throw new Error(errObj.message || "Failed to add member to group");
-        } catch {
-          throw new Error(errorText || "Failed to add member to group");
-        }
+        const msg = await parseApiError(res, "Failed to add member to group");
+        toast.error(msg);
+        return;
       }
-      
-      // Update local state for immediate feedback
       const updatedMembers = members.map(m => {
         if (m.id === selectedMember.id) {
           return { ...m, groupIds: [...(m.groupIds || []), groupId] };
@@ -237,29 +289,31 @@ export default function Members() {
       });
       setMembers(updatedMembers);
       setSelectedMember(prev => prev ? { ...prev, groupIds: [...(prev.groupIds || []), groupId] } : null);
+      toast.success(`${selectedMember.name} added to ${confirmAddGroupName || "group"} successfully`);
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message || "Failed to add member to group");
     }
   };
 
-  const handleRemoveMemberFromGroup = async (groupId: number) => {
-    if (!selectedMember || !user) return;
+  const handleRemoveMemberFromGroup = (groupId: number, groupName: string) => {
+    setConfirmRemoveGroupId(groupId);
+    setConfirmRemoveGroupName(groupName);
+  };
+
+  const doRemoveMemberFromGroup = async () => {
+    if (!selectedMember || !user || confirmRemoveGroupId === null) return;
+    const groupId = confirmRemoveGroupId;
+    setConfirmRemoveGroupId(null);
     try {
       const res = await fetch(`${API_BASE}/api/members/group/${groupId}/remove/${selectedMember.id}`, {
         method: "DELETE",
         headers: { "loggedInUser": user.username },
       });
       if (!res.ok) {
-        const errorText = await res.text();
-        try {
-          const errObj = JSON.parse(errorText);
-          throw new Error(errObj.message || "Failed to remove member from group");
-        } catch {
-          throw new Error(errorText || "Failed to remove member from group");
-        }
+        const msg = await parseApiError(res, "Failed to remove member from group");
+        toast.error(msg);
+        return;
       }
-      
-      // Update local state
       const updatedMembers = members.map(m => {
         if (m.id === selectedMember.id) {
           return { ...m, groupIds: (m.groupIds || []).filter(id => id !== groupId) };
@@ -268,8 +322,9 @@ export default function Members() {
       });
       setMembers(updatedMembers);
       setSelectedMember(prev => prev ? { ...prev, groupIds: (prev.groupIds || []).filter(id => id !== groupId) } : null);
+      toast.success(`${selectedMember.name} removed from ${confirmRemoveGroupName || "group"} successfully`);
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message || "Failed to remove member from group");
     }
   };
 
@@ -388,14 +443,12 @@ export default function Members() {
       </div>
 
       {/* CREATE MODAL */}
-      <Dialog open={createOpen} onOpenChange={(val) => { setError(""); setCreateOpen(val); }}>
+      <Dialog open={createOpen} onOpenChange={(val) => { 
+        if (!val) resetCreateForm(); 
+        setCreateOpen(val); 
+      }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Add New Member</DialogTitle></DialogHeader>
-          {error && (
-            <div className="p-3 text-sm font-medium text-destructive bg-destructive/10 rounded-md border border-destructive/20 mt-2">
-              {error}
-            </div>
-          )}
           <div className="grid grid-cols-2 gap-4 py-4">
              <div className="col-span-2 flex justify-center mb-2">
                 <div className="relative group">
@@ -457,6 +510,18 @@ export default function Members() {
               <Label className="text-xs">Address *</Label>
               <Input value={createForm.address} onChange={e => setCreateForm({ ...createForm, address: e.target.value })} />
             </div>
+            
+            <div className="space-y-2">
+              <Label className="text-xs text-primary">Assign to Group *</Label>
+              <Select value={createForm.groupId} onValueChange={v => setCreateForm({ ...createForm, groupId: v })}>
+                <SelectTrigger><SelectValue placeholder="Select Group" /></SelectTrigger>
+                <SelectContent>
+                  {groups.map(g => (
+                    <SelectItem key={g.id} value={g.id.toString()}>{g.groupName}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
             <div className="col-span-2 pt-2 border-t mt-2"><h3 className="text-sm font-semibold">Bank Information</h3></div>
             <div className="space-y-2">
@@ -494,11 +559,6 @@ export default function Members() {
       <Dialog open={editOpen} onOpenChange={(val) => { setError(""); setEditOpen(val); }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Edit Member: {editForm?.name}</DialogTitle></DialogHeader>
-          {error && (
-            <div className="p-3 text-sm font-medium text-destructive bg-destructive/10 rounded-md border border-destructive/20 mt-2">
-              {error}
-            </div>
-          )}
           <div className="grid grid-cols-2 gap-4 py-4">
              <div className="col-span-2 flex justify-center mb-2">
                 <div className="relative group">
@@ -753,12 +813,6 @@ export default function Members() {
           <DialogHeader>
             <DialogTitle>Manage Groups: {selectedMember?.name}</DialogTitle>
           </DialogHeader>
-          {error && (
-            <div className="p-4 text-sm font-medium text-destructive bg-destructive/10 rounded-md border border-destructive/20 mb-4 flex items-start gap-3 shadow-sm">
-              <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
-              <div className="leading-snug">{error}</div>
-            </div>
-          )}
           <div className="py-4 space-y-4">
             <div className="text-sm text-muted-foreground mb-2">
               Select groups to add or remove this member.
@@ -770,20 +824,20 @@ export default function Members() {
                   <div key={group.id} className="flex items-center justify-between p-3 rounded-lg border bg-card hover:bg-accent/5 transition-colors">
                     <span className="font-medium text-sm">{group.groupName}</span>
                     {isInGroup ? (
-                      <Button 
-                        size="sm" 
-                        variant="destructive" 
+                      <Button
+                        size="sm"
+                        variant="destructive"
                         className="h-8 px-3"
-                        onClick={() => handleRemoveMemberFromGroup(group.id)}
+                        onClick={() => handleRemoveMemberFromGroup(group.id, group.groupName)}
                       >
                         Remove
                       </Button>
                     ) : (
-                      <Button 
-                        size="sm" 
-                        variant="outline" 
+                      <Button
+                        size="sm"
+                        variant="outline"
                         className="h-8 px-3 border-primary text-primary hover:bg-primary/10"
-                        onClick={() => handleAddMemberToGroup(group.id)}
+                        onClick={() => handleAddMemberToGroup(group.id, group.groupName)}
                       >
                         Add
                       </Button>
@@ -799,6 +853,38 @@ export default function Members() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* CONFIRM ADD TO GROUP */}
+      <AlertDialog open={confirmAddGroupId !== null} onOpenChange={(open) => { if (!open) setConfirmAddGroupId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Add to Group?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to add <strong>{selectedMember?.name}</strong> to the group <strong>{confirmAddGroupName}</strong>?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={doAddMemberToGroup}>Yes, Add</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* CONFIRM REMOVE FROM GROUP */}
+      <AlertDialog open={confirmRemoveGroupId !== null} onOpenChange={(open) => { if (!open) setConfirmRemoveGroupId(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-destructive flex items-center gap-2"><AlertTriangle className="h-5 w-5"/> Remove from Group?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove <strong>{selectedMember?.name}</strong> from the group <strong>{confirmRemoveGroupName}</strong>?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={doRemoveMemberFromGroup} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Yes, Remove</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

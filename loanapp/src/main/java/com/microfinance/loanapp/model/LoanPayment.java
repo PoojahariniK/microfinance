@@ -10,7 +10,8 @@ import java.time.LocalDateTime;
 @Table(
     name = "loan_payment",
     indexes = {
-        @Index(name = "idx_schedule", columnList = "loan_schedule_id"),
+        @Index(name = "idx_payment_date", columnList = "paymentDate"),
+        @Index(name = "idx_loan_schedule_id", columnList = "loan_schedule_id"),
         @Index(name = "idx_collector", columnList = "collected_by_id")
     }
 )

@@ -35,46 +35,39 @@ export default function Dashboard() {
     try {
       const headers = { "loggedInUser": user?.username || "" };
       
-      const [summaryRes, pnlRes, pendingRes, trendRes, groupsRes, defaultersRes, activityRes] = await Promise.all([
-        fetch(`${API_BASE}/api/reports/summary`, { headers }),
-        fetch(`${API_BASE}/api/reports/pnl`, { headers }),
-        fetch(`${API_BASE}/api/payments/pending?timeFilter=ALL`, { headers }),
-        fetch(`${API_BASE}/api/reports/trend`, { headers }),
-        fetch(`${API_BASE}/api/reports/groups`, { headers }),
-        fetch(`${API_BASE}/api/reports/pending?groupId=ALL`, { headers }),
+      const [dashRes, pnlRes, overdueRes, groupsRes, activityRes] = await Promise.all([
+        fetch(`${API_BASE}/api/reports/dashboard`, { headers }),
+        fetch(`${API_BASE}/api/reports/financials`, { headers }),
+        fetch(`${API_BASE}/api/reports/outstanding?groupId=ALL`, { headers }),
+        fetch(`${API_BASE}/api/reports/groups?groupId=ALL`, { headers }),
         fetch(`${API_BASE}/api/reports/activity`, { headers })
       ]);
 
-      const [summary, pnl, pending, trend, groups, defaulters, activity] = await Promise.all([
-        summaryRes.ok ? summaryRes.json() : null,
+      const [summary, pnl, defaulters, groups, activity] = await Promise.all([
+        dashRes.ok ? dashRes.json() : null,
         pnlRes.ok ? pnlRes.json() : null,
-        pendingRes.ok ? pendingRes.json() : [],
-        trendRes.ok ? trendRes.json() : [],
+        overdueRes.ok ? overdueRes.json() : [],
         groupsRes.ok ? groupsRes.json() : [],
-        defaultersRes.ok ? defaultersRes.json() : [],
         activityRes.ok ? activityRes.json() : null
       ]);
 
-      // Process Pending for Today's Focus
-      const overdueCount = pending.filter((p: any) => p.isOverdue).length;
-      const todayPending = pending.filter((p: any) => p.dueDate === today).length;
-      
-      // Process Upcoming
-      const upcoming = pending.filter((p: any) => p.dueDate > today).slice(0, 5);
+      // Extract trends and upcoming installments from summary
+      const trend = summary?.trends || [];
+      const upcoming = summary?.upcomingInstallments || []; 
 
-      // Pulse Calculation (Efficiency)
+      // Process Overdue / Delinquency (from Outstanding report)
+      const overdueCount = summary?.highRiskLoansCount || defaulters.length;
+      
+      // For pulse calculations (efficiency)
       const todayCollection = activity?.payments?.filter((p: any) => p.date === today).reduce((sum: number, p: any) => sum + p.amount, 0) || 0;
-      const todayScheduled = pending.filter((p: any) => p.dueDate === today).reduce((sum: number, p: any) => sum + p.amount, 0) || 0;
-      const pulseEfficiency = todayScheduled + todayCollection > 0 ? (todayCollection / (todayScheduled + todayCollection)) * 100 : 0;
+      const pulseEfficiency = summary?.totalCollection > 0 ? (summary.totalCollection / (summary.totalOutstanding + summary.totalCollection)) * 100 : 0;
 
       setData({
         summary,
         pnl,
-        pending,
-        overdueCount,
-        todayPending,
-        trend: trend || [],
+        trend,
         groups,
+        overdueCount,
         defaulters: (defaulters || []).sort((a: any, b: any) => b.pendingAmount - a.pendingAmount).slice(0, 15),
         upcoming,
         activity,
@@ -111,14 +104,14 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Active Loans", value: data.summary?.activeLoans, icon: Banknote, color: "text-blue-600", bg: "bg-blue-50" },
-          { label: "Closed Loans", value: (data.summary?.totalLoans - data.summary?.activeLoans), icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50" },
+          { label: "Closed Loans", value: data.summary?.closedLoans, icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50" },
           { label: "Total Groups", value: data.summary?.totalGroups, icon: UsersRound, color: "text-purple-600", bg: "bg-purple-50" },
-          { label: "Principal O/S", value: `₹${format(data.summary?.pendingAmount)}`, icon: Wallet, color: "text-amber-600", bg: "bg-amber-50" },
+          { label: "Principal O/S", value: `₹${format(data.summary?.totalOutstanding)}`, icon: Wallet, color: "text-amber-600", bg: "bg-amber-50" },
           { label: "Total Collection", value: `₹${format(data.summary?.totalCollection)}`, icon: PiggyBank, color: "text-emerald-600", bg: "bg-emerald-50" },
-          { label: "Interest Earned", value: `₹${format(data.summary?.totalInterestCollected)}`, icon: BarChart3, color: "text-blue-600", bg: "bg-blue-50" },
+          { label: "Interest Earned", value: `₹${format(data.summary?.totalInterestEarned)}`, icon: BarChart3, color: "text-blue-600", bg: "bg-blue-50" },
           { 
             label: "Total Revenue", 
-            value: `₹${format(data.pnl?.totalRevenue)}`, 
+            value: `₹${format(data.pnl?.revenue?.total)}`, 
             icon: TrendingUp, 
             color: "text-primary", 
             bg: "bg-primary/5",
@@ -165,10 +158,10 @@ export default function Dashboard() {
           </CardHeader>
           <CardContent>
             <div className="flex items-baseline gap-2">
-              <span className="text-4xl font-black text-amber-700">{data.todayPending}</span>
-              <span className="text-xs font-bold text-amber-600/60 uppercase">Dues Today</span>
+              <span className="text-4xl font-black text-amber-700">{data.defaulters.filter((d:any) => d.agingBucket === '0-30 days').length}</span>
+              <span className="text-xs font-bold text-amber-600/60 uppercase">Recent Overdue</span>
             </div>
-            <p className="text-[9px] font-bold text-amber-600 mt-2 uppercase tracking-tighter">Collection active for {new Date().toLocaleDateString()}</p>
+            <p className="text-[9px] font-bold text-amber-600 mt-2 uppercase tracking-tighter">New delinquencies this period</p>
           </CardContent>
         </Card>
 

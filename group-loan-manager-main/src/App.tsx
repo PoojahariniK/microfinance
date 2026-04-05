@@ -13,6 +13,7 @@ import Collection from "@/pages/Collection";
 import Pending from "@/pages/Pending";
 import Reports from "@/pages/Reports";
 import StaffPage from "@/pages/Staff";
+import Capital from "@/pages/Capital";
 import NotFound from "@/pages/NotFound";
 
 function AppRoutes() {
@@ -31,6 +32,7 @@ function AppRoutes() {
         <Route path="/pending" element={<Pending />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/staff" element={<StaffPage />} />
+        <Route path="/capital" element={<Capital />} />
       </Route>
       <Route path="*" element={<NotFound />} />
     </Routes>

@@ -28,7 +28,7 @@ export interface LoanInitRequest {
   interestRate: number;
   durationMonths: number;
   startDate: string;
-  endDate: string;
+  endDate?: string;          // optional — system-computed; passed as a hint only
   memberIds: number[];
   charges: LoanChargesDto;
 }
@@ -179,6 +179,7 @@ export interface ChargePaymentMemberDto {
   memberId: number;
   memberName: string;
   amountPaid: number;
+  totalAmount: number;
   paymentDate: string;
 }
 

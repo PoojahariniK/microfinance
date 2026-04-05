@@ -1,14 +1,12 @@
 package com.microfinance.loanapp.dto.report;
 
+import java.time.LocalDate;
+import java.util.List;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import java.time.LocalDate;
-import java.util.List;
 
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
+@Data @NoArgsConstructor @AllArgsConstructor
 public class ActivityReportDto {
     private List<RecentPaymentDto> payments;
     private List<RecentLoanDto> loans;
@@ -16,7 +14,7 @@ public class ActivityReportDto {
     @Data @NoArgsConstructor @AllArgsConstructor
     public static class RecentPaymentDto {
         private String memberName;
-        private Double amount;
+        private double amount;
         private LocalDate date;
     }
 

@@ -12,4 +12,5 @@ import java.util.Optional;
 public interface LoanRepository extends JpaRepository<Loan, Long> {
     Optional<Loan> findByGroup_IdAndStatus(Long groupId, LoanStatus status);
     List<Loan> findByGroup_Id(Long groupId);
+    long countByStatus(LoanStatus status);
 }

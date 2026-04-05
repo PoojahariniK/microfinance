@@ -83,19 +83,37 @@ public class PaymentService {
             throw new ApiException(HttpStatus.FORBIDDEN, "You are not authorized to collect for this group");
         }
 
-        for (PaymentEntryDto p : request.getPayments()) {
-            LoanSchedule s = loanScheduleRepository.findById(p.getLoanScheduleId())
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Schedule not found"));
+        // FETCH AND SORT SCHEDULES TO PROCESS SEQUENTIALLY
+        List<Long> scheduleIds = request.getPayments().stream().map(PaymentEntryDto::getLoanScheduleId).toList();
+        List<LoanSchedule> schedules = loanScheduleRepository.findAllById(scheduleIds);
+        Map<Long, Double> amountMap = request.getPayments().stream()
+                .collect(Collectors.toMap(PaymentEntryDto::getLoanScheduleId, PaymentEntryDto::getAmount));
+
+        schedules.sort(Comparator.comparing((LoanSchedule s) -> s.getLoanMember().getId())
+                .thenComparing(LoanSchedule::getInstallmentNo));
+
+        for (LoanSchedule s : schedules) {
+            double amountToPay = amountMap.get(s.getId());
+
+            // 1. PREVIOUS INSTALLMENT CHECK
+            List<LoanSchedule> previousSchedules = loanScheduleRepository.findByLoanMember_IdAndInstallmentNoLessThan(
+                    s.getLoanMember().getId(), s.getInstallmentNo());
+
+            for (LoanSchedule prev : previousSchedules) {
+                if (prev.getStatus() != PaymentStatus.PAID) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "previous installment is unpaid");
+                }
+            }
 
             if (s.getStatus() == PaymentStatus.PAID) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "Already fully paid");
             }
 
             double scheduleTotal = s.getTotal();
-            double newPaid = safe(s.getPaidAmount()) + p.getAmount();
+            double newPaid = safe(s.getPaidAmount()) + amountToPay;
             double epsilon = 0.01;
 
-            if (p.getAmount() <= 0) {
+            if (amountToPay <= 0) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be > 0");
             }
 
@@ -106,7 +124,7 @@ public class PaymentService {
             // SAVE PAYMENT HISTORY
             LoanPayment payment = new LoanPayment();
             payment.setLoanSchedule(s);
-            payment.setAmount(p.getAmount());
+            payment.setAmount(amountToPay);
             payment.setPaymentDate(request.getPaymentDate());
             payment.setCollectedBy(user);
             payment.setCreatedAt(LocalDateTime.now());
@@ -114,6 +132,7 @@ public class PaymentService {
 
             // UPDATE SCHEDULE
             updateSchedule(s, newPaid, request.getPaymentDate());
+            loanScheduleRepository.flush(); // Ensure sequential visibility
         }
 
         return "Payment recorded";

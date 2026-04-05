@@ -26,6 +26,11 @@ public interface ReportPaymentRepository extends JpaRepository<LoanPayment, Long
            "WHERE p.loanSchedule.loanMember.loan.group.id = :groupId")
     Double sumCollectionByGroup(@Param("groupId") Long groupId);
 
+    @Query("SELECT COALESCE(SUM(p.amount), 0) FROM LoanPayment p " +
+           "WHERE (:groupId IS NULL OR p.loanSchedule.loanMember.loan.group.id = :groupId) " +
+           "AND (:status IS NULL OR p.loanSchedule.loanMember.loan.status = :status)")
+    Double sumCollectionWithFilters(@Param("groupId") Long groupId, @Param("status") com.microfinance.loanapp.enums.LoanStatus status);
+
     // Member report: payments grouped by loanId for a member
     @Query("SELECT p.loanSchedule.loanMember.loan.id, COALESCE(SUM(p.amount), 0) " +
            "FROM LoanPayment p " +
@@ -40,4 +45,10 @@ public interface ReportPaymentRepository extends JpaRepository<LoanPayment, Long
 
     // Period report: loan disbursed (LoanMember.principalAmount) in a period join date range
     // This is on LoanMember, handled in service directly.
+
+    @Query("SELECT COALESCE(SUM(p.amount), 0.0) FROM LoanPayment p WHERE p.paymentDate < :date AND (:groupId IS NULL OR p.loanSchedule.loanMember.loan.group.id = :groupId)")
+    Double sumCollectedBefore(@Param("date") LocalDate date, @Param("groupId") Long groupId);
+
+    @Query("SELECT COALESCE(SUM(p.amount), 0.0) FROM LoanPayment p WHERE p.paymentDate >= :startDate AND p.paymentDate <= :endDate AND (:groupId IS NULL OR p.loanSchedule.loanMember.loan.group.id = :groupId)")
+    Double sumCollectedBetween(@Param("startDate") LocalDate startDate, @Param("endDate") LocalDate endDate, @Param("groupId") Long groupId);
 }

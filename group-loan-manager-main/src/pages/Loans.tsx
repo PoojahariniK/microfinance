@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Plus, Eye, Calendar, AlertTriangle, CheckCircle2, UserPlus, ArrowLeft, ArrowRight, Edit } from "lucide-react";
+import { Plus, Eye, Calendar, AlertTriangle, CheckCircle2, UserPlus, ArrowLeft, ArrowRight, Edit, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { 
@@ -57,6 +57,7 @@ export default function Loans() {
 
   // Filter state
   const [filterGroupId, setFilterGroupId] = useState<string>("");
+  const [search, setSearch] = useState("");
 
   // Create Form state
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
@@ -64,7 +65,6 @@ export default function Loans() {
   const [interestRate, setInterestRate] = useState("2");
   const [duration, setDuration] = useState("12");
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
-  const [endDate, setEndDate] = useState("");
   const [savingAmount, setSavingAmount] = useState("0");
   const [insuranceFee, setInsuranceFee] = useState("0");
   const [processingFee, setProcessingFee] = useState("0");
@@ -73,6 +73,9 @@ export default function Loans() {
   const [step, setStep] = useState(1);
   const [loanDraft, setLoanDraft] = useState<LoanDraftDto | null>(null);
   const [editableSchedule, setEditableSchedule] = useState<LoanSchedulePreviewDto[]>([]);
+  const [expectedInitPrincipal, setExpectedInitPrincipal] = useState(0);
+  const [expectedInitInterest, setExpectedInitInterest] = useState(0);
+  const [expectedMemberTotals, setExpectedMemberTotals] = useState<Record<number, { p: number, i: number }>>({});
   const [targetLoanId, setTargetLoanId] = useState<number | null>(null);
   const [targetMemberId, setTargetMemberId] = useState("");
   const [targetLoanMemberIds, setTargetLoanMemberIds] = useState<number[]>([]);
@@ -82,15 +85,59 @@ export default function Loans() {
   const [addMemberStep, setAddMemberStep] = useState(1);
   const [addMemberDraft, setAddMemberDraft] = useState<AddMemberPreviewResponse | null>(null);
   const [addMemberSchedule, setAddMemberSchedule] = useState<AddMemberScheduleDto[]>([]);
+  const [expectedAddMemberPrincipal, setExpectedAddMemberPrincipal] = useState(0);
+  const [expectedAddMemberInterest, setExpectedAddMemberInterest] = useState(0);
 
   // Member Schedule Edit state
   const [editMemberOpen, setEditMemberOpen] = useState(false);
   const [editingMemberId, setEditingMemberId] = useState<number | null>(null);
   const [editingMemberName, setEditingMemberName] = useState("");
   const [memberSchedules, setMemberSchedules] = useState<MemberScheduleDto[]>([]);
+  const [expectedPrincipal, setExpectedPrincipal] = useState(0);
+  const [expectedInterest, setExpectedInterest] = useState(0);
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
-  const currentLoanSummary = useMemo(() => 
+  /** Parses a backend error response and returns only the human-readable message. */
+  async function parseApiError(res: Response, fallback: string): Promise<string> {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      return parsed.message || fallback;
+    } catch {
+      return text || fallback;
+    }
+  }
+
+  // Mirrors backend calculateEndDate: walks the schedule to find the last installment due date
+  function calcEndDate(start: string, collectionType: string, durationMonths: number): string {
+    if (!start || !collectionType || durationMonths <= 0) return "";
+    const totalMap: Record<string, number> = {
+      DAILY: durationMonths * 30,
+      WEEKLY: durationMonths * 4,
+      BIWEEKLY: durationMonths * 2,
+      MONTHLY: durationMonths,
+    };
+    const total = totalMap[collectionType] ?? durationMonths;
+    const d = new Date(start);
+    for (let i = 1; i < total; i++) {
+      if (collectionType === "DAILY")         d.setDate(d.getDate() + 1);
+      else if (collectionType === "WEEKLY")   d.setDate(d.getDate() + 7);
+      else if (collectionType === "BIWEEKLY") d.setDate(d.getDate() + 14);
+      else                                    d.setMonth(d.getMonth() + 1);
+    }
+    return d.toISOString().split("T")[0];
+  }
+
+  const selectedGroup = groups.find(g => g.id.toString() === selectedGroupId);
+  const durationNum = parseInt(duration) || 0;
+  const endDatePreview = useMemo(() =>
+    selectedGroup && startDate && durationNum > 0 && durationNum <= 200
+      ? calcEndDate(startDate, selectedGroup.collectionType, durationNum)
+      : "",
+    [selectedGroup, startDate, durationNum]
+  );
+
+  const currentLoanSummary = useMemo(() =>
      loanSummaries.find(l => l.id === selectedLoanId),
      [loanSummaries, selectedLoanId]
   );
@@ -194,6 +241,30 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     }
   }, [selectedGroupId, open, fetchGroupMembers]);
 
+  const handleGroupSelect = async (groupId: string) => {
+    if (!groupId || !user) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/loans/group/${groupId}/summary`, {
+        headers: { "loggedInUser": user.username }
+      });
+      if (res.ok) {
+        const summaries = await res.json();
+        const hasActive = summaries.some((l: any) => l.status === "ACTIVE");
+        if (hasActive) {
+          toast.error("This group already has an active loan. Please select a different group.");
+          setSelectedGroupId("");
+          setGroupMembers([]);
+          setSelectedMemberIds([]);
+          return;
+        }
+      }
+    } catch {
+      // fail silently — group select still proceeds
+    }
+    setSelectedGroupId(groupId);
+    setError("");
+  };
+
   const handleInit = async () => {
     if (!selectedGroupId || !loanAmount || !user) {
       toast.error("Please fill all required fields");
@@ -215,7 +286,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           interestRate: parseFloat(interestRate),
           durationMonths: parseInt(duration),
           startDate,
-          endDate,
+          endDate: endDatePreview || undefined,
           memberIds: selectedMemberIds,
           charges: { 
             savingAmount: parseFloat(savingAmount), 
@@ -226,7 +297,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         } as LoanInitRequest)
       });
 
-      if (!res.ok) throw new Error(await res.text() || "Failed to initialize loan");
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to initialize loan"));
       
       const draftData = await res.json();
       setLoanDraft(draftData);
@@ -240,10 +311,21 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         body: JSON.stringify(draftData)
       });
 
-      if (!previewRes.ok) throw new Error(await previewRes.text() || "Failed to generate preview");
+      if (!previewRes.ok) throw new Error(await parseApiError(previewRes, "Failed to generate preview"));
       
       const previewData = await previewRes.json();
       setEditableSchedule(previewData);
+      setExpectedInitPrincipal(previewData.reduce((sum: any, s: any) => sum + s.principal, 0));
+      setExpectedInitInterest(previewData.reduce((sum: any, s: any) => sum + s.interest, 0));
+
+      const mTotals: Record<number, { p: number, i: number }> = {};
+      previewData.forEach((s: any) => {
+          if (!mTotals[s.memberId]) mTotals[s.memberId] = { p: 0, i: 0 };
+          mTotals[s.memberId].p += s.principal;
+          mTotals[s.memberId].i += s.interest;
+      });
+      setExpectedMemberTotals(mTotals);
+
       setStep(2);
     } catch (err: any) {
       setError(err.message);
@@ -255,6 +337,31 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
   const handleConfirm = async () => {
     if (!loanDraft || !user) return;
+    
+    // Validate per member
+    const currentMemberTotals: Record<number, { p: number, i: number }> = {};
+    editableSchedule.forEach(s => {
+       if (!currentMemberTotals[s.memberId]) currentMemberTotals[s.memberId] = { p: 0, i: 0 };
+       currentMemberTotals[s.memberId].p += s.principal;
+       currentMemberTotals[s.memberId].i += s.interest;
+    });
+
+    for (const mIdStr in expectedMemberTotals) {
+       const mId = Number(mIdStr);
+       const expected = expectedMemberTotals[mId];
+       const current = currentMemberTotals[mId] || { p: 0, i: 0 };
+       const memberName = groupMembers.find(m => m.id === mId)?.name || `M-${mId}`;
+
+       if (Math.abs(current.p - expected.p) > 0.1) {
+          toast.error(`Principal for ${memberName} must match ₹${expected.p.toLocaleString()}. Off by ₹${Math.abs(expected.p - current.p).toFixed(2)}`);
+          return;
+       }
+       if (Math.abs(current.i - expected.i) > 0.1) {
+          toast.error(`Interest for ${memberName} must match ₹${expected.i.toLocaleString()}. Off by ₹${Math.abs(expected.i - current.i).toFixed(2)}`);
+          return;
+       }
+    }
+
     setLoading(true);
 
     const confirmRequest: LoanConfirmRequest = {
@@ -272,7 +379,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         body: JSON.stringify(confirmRequest)
       });
 
-      if (!res.ok) throw new Error(await res.text() || "Failed to confirm loan");
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to confirm loan"));
       
       setStep(3);
       toast.success("Group loan created successfully!");
@@ -322,6 +429,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       const data = await res.json();
       setAddMemberDraft(data); // Store the whole response including principalAmount and memberId
       setAddMemberSchedule(data.schedules);
+      setExpectedAddMemberPrincipal(data.schedules.reduce((sum: any, s: any) => sum + s.principal, 0));
+      setExpectedAddMemberInterest(data.schedules.reduce((sum: any, s: any) => sum + s.interest, 0));
       setAddMemberStep(2);
     } catch (err: any) {
       toast.error(err.message);
@@ -332,6 +441,18 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
   const handleAddMemberConfirm = async () => {
     if (!addMemberDraft || !targetLoanId || !user) return;
+    
+    const currentP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
+    const currentI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
+    if (Math.abs(currentP - expectedAddMemberPrincipal) > 0.1) {
+       toast.error(`Total principal must match ₹${expectedAddMemberPrincipal.toLocaleString()}. Currently off by ₹${Math.abs(expectedAddMemberPrincipal - currentP).toFixed(2)}`);
+       return;
+    }
+    if (Math.abs(currentI - expectedAddMemberInterest) > 0.1) {
+       toast.error(`Total interest must match ₹${expectedAddMemberInterest.toLocaleString()}. Currently off by ₹${Math.abs(expectedAddMemberInterest - currentI).toFixed(2)}`);
+       return;
+    }
+
     setLoading(true);
     try {
       const confirmPayload: AddMemberConfirmRequest = { 
@@ -363,6 +484,18 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
   const handleEditMemberSchedule = async () => {
     if (!targetLoanId || !editingMemberId || !user) return;
+    
+    const currentP = memberSchedules.reduce((sum, s) => sum + s.principal, 0);
+    const currentI = memberSchedules.reduce((sum, s) => sum + s.interest, 0);
+    if (Math.abs(currentP - expectedPrincipal) > 0.1) {
+       toast.error(`Total principal must match ₹${expectedPrincipal.toLocaleString()}. Currently off by ₹${Math.abs(expectedPrincipal - currentP).toFixed(2)}`);
+       return;
+    }
+    if (Math.abs(currentI - expectedInterest) > 0.1) {
+       toast.error(`Total interest must match ₹${expectedInterest.toLocaleString()}. Currently off by ₹${Math.abs(expectedInterest - currentI).toFixed(2)}`);
+       return;
+    }
+
     setLoading(true);
     try {
       const req: any = { // Using any to bypass strict type check for now if needed, or update the interface
@@ -414,6 +547,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         setEditingMemberId(memberId);
         setEditingMemberName(memberName);
         setTargetLoanId(loanId);
+        setExpectedPrincipal(data.reduce((sum: any, s: any) => sum + s.principal, 0));
+        setExpectedInterest(data.reduce((sum: any, s: any) => sum + s.interest, 0));
         setEditMemberOpen(true);
       }
     } catch (err) {
@@ -468,7 +603,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setInterestRate("2");
     setDuration("12");
     setStartDate(new Date().toISOString().split('T')[0]);
-    setEndDate("");
     setSavingAmount("0");
     setInsuranceFee("0");
     setProcessingFee("0");
@@ -490,33 +624,16 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div className="flex items-center justify-between">
         <h2 className="page-header mb-0">Group Loans</h2>
-        <div className="flex items-center gap-3 w-full sm:w-auto">
-          <div className="flex items-center gap-2 flex-grow sm:flex-grow-0">
-            <Label className="text-sm whitespace-nowrap">Filter Group:</Label>
-            <Select value={filterGroupId} onValueChange={(v) => { setFilterGroupId(v); setSelectedLoanId(null); }}>
-              <SelectTrigger className="w-[200px]">
-                <SelectValue placeholder="Select a group" />
-              </SelectTrigger>
-              <SelectContent>
-                {groups.map(g => (
-                  <SelectItem key={g.id} value={g.id.toString()}>
-                    {g.groupName} ({g.collectionType})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          
-          {isAdmin && (
-            <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) resetForm(); }}>
-              <DialogTrigger asChild>
-                <Button size="sm" className="gap-2 shrink-0">
-                  <Plus className="h-4 w-4" />New Group Loan
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto pt-10">
+        {isAdmin && (
+          <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) resetForm(); }}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="gap-2 shrink-0">
+                <Plus className="h-4 w-4" />New Group Loan
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto pt-10">
                 <DialogHeader>
                   <DialogTitle className="flex items-center gap-2">
                     {step === 1 && "Create Group Loan - Step 1: Initialization"}
@@ -530,7 +647,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="space-y-2">
                         <Label className="text-xs">Select Group *</Label>
-                        <Select value={selectedGroupId} onValueChange={(v) => { setSelectedGroupId(v); setError(""); }}>
+                        <Select value={selectedGroupId} onValueChange={handleGroupSelect}>
                           <SelectTrigger><SelectValue placeholder="Select group" /></SelectTrigger>
                           <SelectContent>
                             {groups.map(g => <SelectItem key={g.id} value={g.id.toString()}>{g.groupName} ({g.collectionType})</SelectItem>)}
@@ -538,7 +655,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                         </Select>
                       </div>
                       <div className="space-y-2">
-                        <Label className="text-xs">Total Loan Amount *</Label>
+                        <Label className="text-xs">Loan Amount(Per Person) *</Label>
                         <Input type="number" value={loanAmount} onChange={e => setLoanAmount(e.target.value)} placeholder="₹" />
                       </div>
                       <div className="space-y-2">
@@ -546,35 +663,50 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                         <Input type="number" value={interestRate} onChange={e => setInterestRate(e.target.value)} />
                       </div>
                       <div className="space-y-2">
-                        <Label className="text-xs">Duration (months)</Label>
-                        <Input type="number" value={duration} onChange={e => setDuration(e.target.value)} />
-                      </div>
-                      <div className="space-y-2">
                         <Label className="text-xs">Start Date</Label>
                         <Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
                       </div>
                       <div className="space-y-2">
-                        <Label className="text-xs">End Date</Label>
-                        <Input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+                        <Label className="text-xs">Duration (months)</Label>
+                        <Input
+                          type="number"
+                          value={duration}
+                          onChange={e => setDuration(e.target.value)}
+                          min={1} max={200}
+                          className={durationNum <= 0 || durationNum > 200 ? "border-destructive" : ""}
+                        />
+                        {(durationNum <= 0 || durationNum > 200) && (
+                          <p className="text-[11px] text-destructive">Duration must be between 1 and 200 months</p>
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        <Label className="text-xs">Calculated End Date</Label>
+                        <Input
+                          type="text"
+                          value={endDatePreview || "—"}
+                          readOnly
+                          className="bg-muted/60 cursor-not-allowed text-muted-foreground"
+                        />
+                        <p className="text-[11px] text-muted-foreground">Auto-computed by system from start date &amp; duration</p>
                       </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t">
                       <div className="space-y-2">
                         <Label className="text-xs">Saving Amount (per member)</Label>
-                        <Input type="number" value={savingAmount} onChange={e => setSavingAmount(e.target.value)} />
+                        <Input type="number" min={0} value={savingAmount} onChange={e => setSavingAmount(e.target.value)} />
                       </div>
                       <div className="space-y-2">
                         <Label className="text-xs">Insurance Fee (per member)</Label>
-                        <Input type="number" value={insuranceFee} onChange={e => setInsuranceFee(e.target.value)} />
+                        <Input type="number" min={0} value={insuranceFee} onChange={e => setInsuranceFee(e.target.value)} />
                       </div>
                       <div className="space-y-2">
                         <Label className="text-xs">Processing Fee (per member)</Label>
-                        <Input type="number" value={processingFee} onChange={e => setProcessingFee(e.target.value)} />
+                        <Input type="number" min={0} value={processingFee} onChange={e => setProcessingFee(e.target.value)} />
                       </div>
                       <div className="space-y-2">
                         <Label className="text-xs">Document Fee (per member)</Label>
-                        <Input type="number" value={documentFee} onChange={e => setDocumentFee(e.target.value)} />
+                        <Input type="number" min={0} value={documentFee} onChange={e => setDocumentFee(e.target.value)} />
                       </div>
                     </div>
 
@@ -610,82 +742,133 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
                 {step === 2 && loanDraft && (
                   <div className="space-y-4 py-4">
-                    <div className="flex items-center justify-between bg-muted/50 p-2 rounded-md text-xs">
-                       <div><strong>Amount:</strong> ₹{loanDraft.totalLoanAmount.toLocaleString()}</div>
-                       <div><strong>Interest:</strong> {loanDraft.interestRate}%</div>
-                       <div><strong>Duration:</strong> {loanDraft.durationMonths} mo</div>
-                       <div className={Math.abs(editableSchedule.reduce((sum, s) => sum + s.principal, 0) - loanDraft.totalLoanAmount) < 0.1 ? "text-success" : "text-destructive font-bold"}>
-                          <strong>Status:</strong> {Math.abs(editableSchedule.reduce((sum, s) => sum + s.principal, 0) - loanDraft.totalLoanAmount) < 0.1 ? "Balanced" : `Principal mismatch: ₹${(editableSchedule.reduce((sum, s) => sum + s.principal, 0) - loanDraft.totalLoanAmount).toFixed(2)}`}
-                       </div>
+                    <div className="flex items-center justify-between bg-muted/50 p-2 rounded-md text-xs flex-wrap gap-2">
+                      <div className="flex gap-4">
+                        <div><strong>Amount:</strong> ₹{loanDraft.totalLoanAmount.toLocaleString()}</div>
+                        <div><strong>Interest:</strong> {loanDraft.interestRate}%</div>
+                        <div><strong>Duration:</strong> {loanDraft.durationMonths} mo</div>
+                      </div>
+                      <div className="flex gap-4">
+                        {(() => {
+                           const currentP = editableSchedule.reduce((sum, s) => sum + s.principal, 0);
+                           const currentI = editableSchedule.reduce((sum, s) => sum + s.interest, 0);
+                           const currentTotal = currentP + currentI;
+                           const expectedTotal = expectedInitPrincipal + expectedInitInterest;
+                           return (
+                              <>
+                                <span className={`font-bold ${Math.abs(currentP - expectedInitPrincipal) > 0.1 ? 'text-destructive' : ''}`}>
+                                  Principal: ₹{currentP.toLocaleString()} / ₹{expectedInitPrincipal.toLocaleString()}
+                                </span>
+                                <span className={`font-bold ${Math.abs(currentI - expectedInitInterest) > 0.1 ? 'text-destructive' : ''}`}>
+                                  Interest: ₹{currentI.toLocaleString()} / ₹{expectedInitInterest.toLocaleString()}
+                                </span>
+                                <span className={`font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
+                                  Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
+                                </span>
+                              </>
+                           );
+                        })()}
+                      </div>
                     </div>
 
-                    <div className="max-h-[50vh] overflow-y-auto border rounded-md">
-                      <table className="data-table text-[11px]">
-                        <thead className="sticky top-0 bg-background shadow-sm">
-                          <tr>
-                            <th>Inst #</th>
-                            <th>Member</th>
-                            <th>Due Date</th>
-                            <th>Principal</th>
-                            <th>Interest</th>
-                            <th>Total</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {editableSchedule.map((item, i) => (
-                            <tr key={`${item.memberId}-${item.installmentNo}`}>
-                              <td className="text-center font-bold text-primary">{item.installmentNo}</td>
-                              <td className="max-w-[100px] truncate">{groupMembers.find(gm => gm.id === item.memberId)?.name || `M-${item.memberId}`}</td>
-                              <td>
-                                <Input
-                                  type="date"
-                                  value={item.dueDate}
-                                  onChange={e => {
-                                    const updated = [...editableSchedule];
-                                    updated[i] = { ...item, dueDate: e.target.value };
-                                    setEditableSchedule(updated);
-                                  }}
-                                  className="h-7 w-[140px] text-[11px] px-1"
-                                />
-                              </td>
-                              <td>
-                                <Input
-                                  type="number"
-                                  value={item.principal}
-                                  onChange={e => {
-                                    const val = Number(e.target.value);
-                                    const updated = [...editableSchedule];
-                                    updated[i] = { ...item, principal: val, total: Number((val + item.interest).toFixed(2)) };
-                                    setEditableSchedule(updated);
-                                  }}
-                                  className="h-7 w-20 text-[11px] px-1"
-                                />
-                              </td>
-                              <td>
-                                <Input
-                                  type="number"
-                                  value={item.interest}
-                                  onChange={e => {
-                                    const val = Number(e.target.value);
-                                    const updated = [...editableSchedule];
-                                    updated[i] = { ...item, interest: val, total: Number((val + item.principal).toFixed(2)) };
-                                    setEditableSchedule(updated);
-                                  }}
-                                  className="h-7 w-20 text-[11px] px-1"
-                                />
-                              </td>
-                              <td className="p-0">
-                                <Input
-                                    type="number"
-                                    value={item.total}
-                                    readOnly
-                                    className="h-7 w-20 text-[11px] px-1 font-bold bg-muted/50 cursor-not-allowed"
-                                  />
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                    <div className="max-h-[55vh] overflow-y-auto space-y-4 pr-1">
+                       {Object.keys(expectedMemberTotals).map(mIdStr => {
+                          const mId = Number(mIdStr);
+                          const memberName = groupMembers.find(m => m.id === mId)?.name || `M-${mId}`;
+                          const memberRows = editableSchedule.filter(s => s.memberId === mId);
+                          
+                          const currentP = memberRows.reduce((sum, s) => sum + s.principal, 0);
+                          const currentI = memberRows.reduce((sum, s) => sum + s.interest, 0);
+                          const currentTotal = currentP + currentI;
+                          const expected = expectedMemberTotals[mId];
+                          const expectedTotal = expected.p + expected.i;
+
+                          return (
+                             <div key={mId} className="border rounded-md overflow-hidden border-border/80">
+                                <div className="bg-primary/5 p-2 flex justify-between items-center text-xs flex-wrap gap-2 border-b border-border/50">
+                                   <span className="font-bold text-primary">{memberName}</span>
+                                   <div className="flex gap-4">
+                                      <span className={`font-semibold ${Math.abs(currentP - expected.p) > 0.1 ? 'text-destructive' : ''}`}>
+                                        Principal: ₹{currentP.toLocaleString()} / ₹{expected.p.toLocaleString()}
+                                      </span>
+                                      <span className={`font-semibold ${Math.abs(currentI - expected.i) > 0.1 ? 'text-destructive' : ''}`}>
+                                        Interest: ₹{currentI.toLocaleString()} / ₹{expected.i.toLocaleString()}
+                                      </span>
+                                      <span className={`font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
+                                        Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
+                                      </span>
+                                   </div>
+                                </div>
+                                <table className="data-table text-[11px] w-full mt-0">
+                                  <thead className="bg-background">
+                                    <tr>
+                                      <th className="w-12 text-center">Inst #</th>
+                                      <th>Due Date</th>
+                                      <th>Principal</th>
+                                      <th>Interest</th>
+                                      <th>Total</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {memberRows.map(item => {
+                                      const originalIndex = editableSchedule.findIndex(s => s.memberId === item.memberId && s.installmentNo === item.installmentNo);
+                                      return (
+                                        <tr key={`${item.memberId}-${item.installmentNo}`}>
+                                          <td className="text-center font-bold text-primary">{item.installmentNo}</td>
+                                          <td>
+                                            <Input
+                                              type="date"
+                                              value={item.dueDate}
+                                              onChange={e => {
+                                                const updated = [...editableSchedule];
+                                                updated[originalIndex] = { ...item, dueDate: e.target.value };
+                                                setEditableSchedule(updated);
+                                              }}
+                                              className="h-7 w-[140px] text-[11px] px-1"
+                                            />
+                                          </td>
+                                          <td>
+                                            <Input
+                                              type="number"
+                                              value={item.principal}
+                                              onChange={e => {
+                                                const val = Number(e.target.value);
+                                                const updated = [...editableSchedule];
+                                                updated[originalIndex] = { ...item, principal: val, total: Number((val + item.interest).toFixed(2)) };
+                                                setEditableSchedule(updated);
+                                              }}
+                                              className="h-7 w-20 text-[11px] px-1"
+                                            />
+                                          </td>
+                                          <td>
+                                            <Input
+                                              type="number"
+                                              value={item.interest}
+                                              onChange={e => {
+                                                const val = Number(e.target.value);
+                                                const updated = [...editableSchedule];
+                                                updated[originalIndex] = { ...item, interest: val, total: Number((val + item.principal).toFixed(2)) };
+                                                setEditableSchedule(updated);
+                                              }}
+                                              className="h-7 w-20 text-[11px] px-1"
+                                            />
+                                          </td>
+                                          <td className="p-0">
+                                            <Input
+                                                type="number"
+                                                value={item.total}
+                                                readOnly
+                                                className="h-7 w-20 text-[11px] px-1 font-bold bg-muted/50 cursor-not-allowed"
+                                              />
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                             </div>
+                          );
+                       })}
                     </div>
 
                     <div className="flex gap-3">
@@ -706,7 +889,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                      <p className="text-muted-foreground text-sm max-w-xs">
                         The group loan has been distributed among the selected members and schedules are generated.
                      </p>
-                     <Button onClick={() => setOpen(false)} className="px-8">Close</Button>
+                     <Button onClick={() => { setOpen(false); window.location.reload(); }} className="px-8">Close</Button>
                   </div>
                 )}
               </DialogContent>
@@ -762,8 +945,31 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                     {loading ? "Saving..." : "Save Changes"}
                   </Button>
                 </div>
-             </DialogContent>
-          </Dialog>
+              </DialogContent>
+           </Dialog>
+        </div>
+      
+      <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between bg-muted/30 p-3 rounded-lg border">
+        <div className="relative w-full md:max-w-xs">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="Search group name or ID..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 bg-background" />
+        </div>
+
+        <div className="flex items-center gap-2 w-full md:w-auto">
+          <Label className="text-sm whitespace-nowrap">Filter Group:</Label>
+          <Select value={filterGroupId || "ALL"} onValueChange={(v) => { setFilterGroupId(v === "ALL" ? "" : v); setSelectedLoanId(null); }}>
+            <SelectTrigger className="w-[200px] bg-background">
+              <SelectValue placeholder="Select a group" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">All Groups</SelectItem>
+              {groups.map(g => (
+                <SelectItem key={g.id} value={g.id.toString()}>
+                  {g.groupName} ({g.collectionType})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
@@ -792,10 +998,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
               <tbody>
                 {fetchingLoans ? (
                   <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">Loading summaries...</td></tr>
-                ) : loanSummaries.length === 0 ? (
+                ) : loanSummaries.filter(ls => ls.groupName?.toLowerCase().includes(search.toLowerCase()) || ls.id.toString().includes(search)).length === 0 ? (
                   <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">No loans found.</td></tr>
                 ) : (
-                  loanSummaries.map((ls) => (
+                  loanSummaries.filter(ls => ls.groupName?.toLowerCase().includes(search.toLowerCase()) || ls.id.toString().includes(search)).map((ls) => (
                     <tr key={ls.id}>
                       <td className="font-bold text-primary"># {ls.id}</td>
                       <td>{ls.groupName}</td>
@@ -1017,9 +1223,29 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto mt-4 pr-1 space-y-4">
-             <div className="bg-primary/5 p-3 rounded-lg border border-primary/10 flex justify-between items-center">
+             <div className="bg-primary/5 p-3 rounded-lg border border-primary/10 flex justify-between items-center flex-wrap gap-2">
                 <span className="text-xs font-semibold text-primary">Member ID: # {editingMemberId}</span>
-                <span className="text-xs font-bold">Total Principal: ₹{memberSchedules.reduce((sum, s) => sum + s.principal, 0).toLocaleString()}</span>
+                <div className="flex gap-4">
+                  {(() => {
+                     const currentP = memberSchedules.reduce((sum, s) => sum + s.principal, 0);
+                     const currentI = memberSchedules.reduce((sum, s) => sum + s.interest, 0);
+                     const currentTotal = currentP + currentI;
+                     const expectedTotal = expectedPrincipal + expectedInterest;
+                     return (
+                        <>
+                          <span className={`text-xs font-bold ${Math.abs(currentP - expectedPrincipal) > 0.1 ? 'text-destructive' : ''}`}>
+                            Principal: ₹{currentP.toLocaleString()} / ₹{expectedPrincipal.toLocaleString()}
+                          </span>
+                          <span className={`text-xs font-bold ${Math.abs(currentI - expectedInterest) > 0.1 ? 'text-destructive' : ''}`}>
+                            Interest: ₹{currentI.toLocaleString()} / ₹{expectedInterest.toLocaleString()}
+                          </span>
+                          <span className={`text-xs font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
+                            Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
+                          </span>
+                        </>
+                     );
+                  })()}
+                </div>
              </div>
              
              <table className="data-table text-xs">
@@ -1041,7 +1267,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                         <td>
                           <Input 
                             type="date" 
-                            className="h-7 text-xs w-32" 
+                            className="h-7 text-xs w-[145px] px-1" 
                             value={s.dueDate || ""} 
                             disabled={isPaid}
                             onChange={(e) => {
@@ -1115,9 +1341,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 <Select value={targetMemberId} onValueChange={setTargetMemberId}>
                   <SelectTrigger><SelectValue placeholder="Choose a member" /></SelectTrigger>
                   <SelectContent>
-                    {groupMembers
-                      .filter(m => !targetLoanMemberIds.includes(m.id))
-                      .map(m => <SelectItem key={m.id} value={m.id.toString()}>{m.name}</SelectItem>)}
+                    {(() => {
+                        const available = groupMembers.filter(m => !targetLoanMemberIds.includes(m.id));
+                        if(available.length === 0) return <SelectItem value="none" disabled>No eligible members remaining</SelectItem>;
+                        return available.map(m => <SelectItem key={m.id} value={m.id.toString()}>{m.name}</SelectItem>);
+                    })()}
                   </SelectContent>
                 </Select>
               </div>
@@ -1133,8 +1361,29 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
           {addMemberStep === 2 && addMemberDraft && (
             <div className="space-y-4 py-4">
-              <div className="p-3 bg-primary/5 rounded-md text-xs border border-primary/10">
-                 Previewing schedule for member: <strong>{groupMembers.find(m => m.id === Number(targetMemberId))?.name}</strong>
+              <div className="p-3 bg-primary/5 rounded-md text-xs border border-primary/10 flex justify-between items-center flex-wrap gap-2">
+                 <span>Previewing schedule for member: <strong>{groupMembers.find(m => m.id === Number(targetMemberId))?.name}</strong></span>
+                 <div className="flex gap-4">
+                  {(() => {
+                     const currentP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
+                     const currentI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
+                     const currentTotal = currentP + currentI;
+                     const expectedTotal = expectedAddMemberPrincipal + expectedAddMemberInterest;
+                     return (
+                        <>
+                          <span className={`text-xs font-bold ${Math.abs(currentP - expectedAddMemberPrincipal) > 0.1 ? 'text-destructive' : ''}`}>
+                            Principal: ₹{currentP.toLocaleString()} / ₹{expectedAddMemberPrincipal.toLocaleString()}
+                          </span>
+                          <span className={`text-xs font-bold ${Math.abs(currentI - expectedAddMemberInterest) > 0.1 ? 'text-destructive' : ''}`}>
+                            Interest: ₹{currentI.toLocaleString()} / ₹{expectedAddMemberInterest.toLocaleString()}
+                          </span>
+                          <span className={`text-xs font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
+                            Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
+                          </span>
+                        </>
+                     );
+                  })()}
+                 </div>
               </div>
               
               <div className="max-h-60 overflow-y-auto border rounded-md">
@@ -1212,7 +1461,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 <CheckCircle2 className="h-10 w-10" />
               </div>
               <h3 className="text-xl font-bold">Member Added Successfully!</h3>
-              <Button onClick={() => setAddMemberOpen(false)} className="px-8">Close</Button>
+              <Button onClick={() => { setAddMemberOpen(false); window.location.reload(); }} className="px-8">Close</Button>
             </div>
           )}
         </DialogContent>

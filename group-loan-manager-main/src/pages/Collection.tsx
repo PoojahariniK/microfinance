@@ -56,6 +56,18 @@ export default function Collection() {
   // Loan Charges
   const [chargeStatus, setChargeStatus] = useState<ChargeStatusResponse | null>(null);
   const [paidChargesMembers, setPaidChargesMembers] = useState<ChargePaymentMemberDto[]>([]);
+  const [chargeInputs, setChargeInputs] = useState<Record<number, string>>({});
+
+  // Overpayment Confirmation
+  const [overpaymentSummary, setOverpaymentSummary] = useState<{
+    memberName: string;
+    totalDue: number;
+    excess: number;
+    distribution: { installmentNo: number; amount: number; loanScheduleId: number }[];
+  }[]>([]);
+  const [pendingPayments, setPendingPayments] = useState<PaymentEntryDto[]>([]);
+  const [showOverpaymentConfirm, setShowOverpaymentConfirm] = useState(false);
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
   // 1. Fetch Groups
   useEffect(() => {
@@ -144,7 +156,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       setCollectionData(collData);
       const overrides: Record<number, number> = {};
       collData?.members?.forEach(m => {
-        overrides[m.loanScheduleId] = m.status === 'UNPAID' ? m.totalDue : m.paidAmount;
+        // Clear input field (0) for any installment already has payments (PARTIAL or PAID).
+        // Only pre-fill (totalDue) for purely UNPAID installments as a data-entry helper.
+        const isActuallyUnpaid = m.status === 'UNPAID' && (m.paidAmount || 0) === 0;
+        overrides[m.loanScheduleId] = isActuallyUnpaid ? m.totalDue : 0;
       });
       setEditedEntries(overrides);
     } catch (e: any) {
@@ -165,19 +180,90 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     return false;
   };
 
-  const handleSaveCollection = async () => {
+  const handleSaveCollection = async (confirmedPayments?: PaymentEntryDto[]) => {
     if (!collectionData) return;
-    let activePayload: PaymentEntryDto[] = [];
-    collectionData?.members?.forEach(m => {
-       const userVal = editedEntries[m.loanScheduleId];
-       if (!adminEditMode && m.status === "PAID") return;
-       if (userVal <= 0) return;
-       activePayload.push({ loanScheduleId: m.loanScheduleId, amount: userVal });
-    });
+    
+    let activePayload: PaymentEntryDto[] = confirmedPayments || [];
+    let overpayments: typeof overpaymentSummary = [];
+
+    if (!confirmedPayments) {
+      collectionData?.members?.forEach(m => {
+        const userVal = editedEntries[m.loanScheduleId];
+        if (!adminEditMode && m.status === "PAID") return;
+        if (userVal <= 0) return;
+
+        const dueRightNow = m.totalDue - (m.paidAmount || 0);
+        
+        if (userVal > dueRightNow + 0.01) {
+          const excess = userVal - dueRightNow;
+          const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+          
+          if (memberId) {
+            // Find future schedules for this member
+            const futureSchedules = availableSchedules
+              .filter(s => s.installmentNo > collectionData.installmentNo)
+              .sort((a, b) => a.installmentNo - b.installmentNo)
+              .map(s => {
+                const memberSched = s.members.find(sm => sm.memberId === memberId);
+                return { ...s, memberSched };
+              })
+              .filter(s => s.memberSched && (s.memberSched.status !== 'PAID'));
+
+            let remainingExcess = excess;
+            const distribution: typeof overpaymentSummary[0]['distribution'] = [];
+            
+            // Add current installment first
+            activePayload.push({ loanScheduleId: m.loanScheduleId, amount: dueRightNow });
+
+            for (const fs of futureSchedules) {
+              if (remainingExcess <= 0) break;
+              if (!fs.memberSched) continue;
+
+              const fsDue = fs.memberSched.total - (fs.memberSched.paidAmount || 0);
+              const apply = Math.min(remainingExcess, fsDue);
+              
+              if (apply > 0) {
+                distribution.push({ 
+                  installmentNo: fs.installmentNo, 
+                  amount: apply, 
+                  loanScheduleId: fs.memberSched.loanScheduleId! 
+                });
+                activePayload.push({ loanScheduleId: fs.memberSched.loanScheduleId!, amount: apply });
+                remainingExcess -= apply;
+              }
+            }
+
+            if (distribution.length > 0) {
+              overpayments.push({
+                memberName: m.memberName,
+                totalDue: dueRightNow,
+                excess: excess,
+                distribution
+              });
+            } else {
+              // If no future installments found, we still treat it as trying to pay more
+              // But we can't distribute it. The backend will reject it anyway.
+              activePayload.push({ loanScheduleId: m.loanScheduleId, amount: userVal });
+            }
+          }
+        } else {
+          activePayload.push({ loanScheduleId: m.loanScheduleId, amount: userVal });
+        }
+      });
+    }
+
+    if (overpayments.length > 0) {
+      setOverpaymentSummary(overpayments);
+      setPendingPayments(activePayload);
+      setShowOverpaymentConfirm(true);
+      return;
+    }
+
     if (activePayload.length === 0) {
        toast.warning("No payment entered! Skipping empty sync request.");
        return;
     }
+
     setLoading(true);
     try {
        const payloadObj = {
@@ -192,9 +278,20 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
          body: JSON.stringify(payloadObj)
        });
        if (!res.ok) throw new Error(await res.text());
+       
        toast.success("Collection successfully recorded!");
        setAdminEditMode(false);
+       
+       // Clear inputs for paid members
+       const paidScheduleIds = activePayload.map(p => p.loanScheduleId);
+       setEditedEntries(prev => {
+         const next = { ...prev };
+         paidScheduleIds.forEach(id => delete next[id]);
+         return next;
+       });
+
        await handleDueChange(selectedDueNumber);
+       setShowOverpaymentConfirm(false);
     } catch (e: any) {
        toast.error(e.message || "Failed to commit payments");
     } finally {
@@ -232,18 +329,42 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     } catch (e: any) { toast.error(e.message); } finally { setLoading(false); }
   };
 
-  const postChargePayment = async (memberId: number, loanTotalMemberBindingValue: number ) => {
-     try {
-       const payload: ChargePaymentRequest = { memberId, amountPaid: loanTotalMemberBindingValue };
-       const res = await fetch(`${API_BASE}/api/loans/${selectedLoanId}/charges/pay`, {
-         method: "POST",
-         headers: { "Content-Type": "application/json", "loggedInUser": user?.username || "" },
-         body: JSON.stringify(payload)
-       });
-       if (!res.ok) throw new Error(await res.text());
-       toast.success("Charge Payment Successful");
-       await fetchLoanCharges(selectedLoanId);
-     } catch (e: any) { toast.error(e.message); }
+  const postChargePayment = async (memberId: number) => {
+      try {
+        const inputVal = chargeInputs[memberId];
+        const amount = Number(inputVal);
+        
+        if (!inputVal || isNaN(amount) || amount <= 0) {
+          toast.error("Please enter a valid payment amount");
+          return;
+        }
+
+        const payMatch = paidChargesMembers.find(p => p.memberId === memberId);
+        const existing = payMatch?.amountPaid || 0;
+        const totalValue = payMatch?.totalAmount || 0;
+        
+        // Fallback total calculation if backend field is missing
+        const ch = targetLoanRef?.charges;
+        const fallbackTotal = (ch?.documentFee || 0) + (ch?.insuranceFee || 0) + (ch?.processingFee || 0) + (ch?.savingAmount || 0);
+        const effectiveTotal = totalValue || fallbackTotal;
+
+        if (existing + amount > effectiveTotal + 0.01) {
+          toast.error(`Payment exceeds remaining balance (₹${(effectiveTotal - existing).toLocaleString()})`);
+          return;
+        }
+
+        const res = await fetch(`${API_BASE}/api/loans/${selectedLoanId}/charges/pay`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "loggedInUser": user?.username || "" },
+          body: JSON.stringify({ memberId, amountPaid: amount })
+        });
+        
+        if (!res.ok) throw new Error(await res.text());
+        
+        toast.success("Charge Payment Successful");
+        setChargeInputs(prev => ({ ...prev, [memberId]: "" }));
+        await fetchLoanCharges(selectedLoanId);
+      } catch (e: any) { toast.error(e.message); }
   };
   const handlePrint = () => {
   const content = document.querySelector(".receipt-page")?.innerHTML;
@@ -312,7 +433,8 @@ availableSchedules[0]?.members?.forEach((m) => {
   };
 
   const totalDue = collectionData?.members?.reduce((s, m) => s + m.totalDue, 0) || 0;
-  const dynamicallyCollected = collectionData?.members?.reduce((s, m) => s + (editedEntries[m.loanScheduleId] || 0), 0) || 0;
+  // Aggregate today's progress: Sum of already paid amounts + current session inputs
+  const dynamicallyCollected = collectionData?.members?.reduce((s, m) => s + (m.paidAmount || 0) + (editedEntries[m.loanScheduleId] || 0), 0) || 0;
   const targetGroupRef = groups.find(g => String(g.id) === selectedGroup);
   const targetLoanRef = activeLoans.find(l => String(l.id) === selectedLoanId);
 
@@ -496,14 +618,19 @@ availableSchedules[0]?.members?.forEach((m) => {
         (ch?.savingAmount || 0)
       : 0;
 
+    const collectionVal = specificPayMatch?.amountPaid || 0;
+    const remainingVal = Math.max(0, total - collectionVal);
+
     //  FIXED LOGIC (move outside JSX)
     const isZeroCharge = total === 0;
 
     const statusText = isZeroCharge
       ? 'NIL'
-      : specificPayMatch
+      : collectionVal >= total - 0.01
         ? 'PAID'
-        : 'PENDING';
+        : collectionVal > 0 
+          ? 'PARTIAL'
+          : 'PENDING';
 
     return (
       <tr key={i}>
@@ -531,8 +658,16 @@ availableSchedules[0]?.members?.forEach((m) => {
           ₹{ch?.savingAmount || 0}
         </td>
 
-        <td className="border border-black p-1.5 text-right font-black">
+        <td className="border border-black p-1.5 text-right font-black amount-cell">
           ₹{total.toLocaleString()}
+        </td>
+        
+        <td className="border border-black p-1.5 text-right font-black amount-cell text-emerald-700">
+          ₹{collectionVal.toLocaleString()}
+        </td>
+
+        <td className="border border-black p-1.5 text-right font-black amount-cell text-rose-700">
+          ₹{remainingVal.toLocaleString()}
         </td>
 
         <td className="border border-black p-1.5 text-center">
@@ -653,7 +788,7 @@ availableSchedules[0]?.members?.forEach((m) => {
                 </Select>
               </div>
               <div className="flex items-end">
-                <Button className="w-full h-9 gap-2 font-bold shadow-md bg-primary hover:bg-primary/90" onClick={handleSaveCollection} disabled={!collectionData || loading || !isAuthorized}>
+                <Button className="w-full h-9 gap-2 font-bold shadow-md bg-primary hover:bg-primary/90" onClick={() => handleSaveCollection()} disabled={!collectionData || loading || !isAuthorized}>
                   <Save className="h-4 w-4" /> {loading ? "Syncing..." : "Commit Collection"}
                 </Button>
               </div>
@@ -789,7 +924,7 @@ availableSchedules[0]?.members?.forEach((m) => {
 
           {/* LOAN CHARGES COMPONENT */}
           {selectedLoanId && chargeStatus && (
-            <div className="form-section no-print p-0 overflow-hidden border border-border/40 shadow-md bg-white mt-4">
+            <div className="form-section no-print p-0 overflow-x-auto border border-border/40 shadow-md bg-white mt-4">
               <div className="p-4 bg-emerald-50/30 border-b flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div className="p-2 bg-emerald-100 text-emerald-700 rounded-lg"><ShieldAlert className="h-5 w-5" /></div>
@@ -805,18 +940,20 @@ availableSchedules[0]?.members?.forEach((m) => {
                 </div>
               </div>
               
-              <table className="data-table text-xs">
+              <table className="data-table text-xs min-w-[1000px]">
                 <thead className="bg-gray-100 border-b uppercase">
                   <tr>
-                    <th className="text-center w-12">#</th>
-                    <th className="text-left">Member Detail</th>
-                    <th className="text-right w-24">Proc Fee</th>
-                    <th className="text-right w-24">Doc Fee</th>
-                    <th className="text-right w-24">Ins Fee</th>
-                    <th className="text-right w-24">Savings</th>
-                    <th className="text-right w-28 font-black">Total</th>
-                    <th className="text-center w-32">Status</th>
-                    <th className="w-32 px-4">Action</th>
+                      <th className="text-center w-12 py-3 px-2 font-black">#</th>
+                      <th className="text-left py-3 px-2 font-black">Member Detail</th>
+                      <th className="text-left w-24 py-3 px-2 font-black whitespace-nowrap">Proc Fee</th>
+                      <th className="text-left w-24 py-3 px-2 font-black whitespace-nowrap">Doc Fee</th>
+                      <th className="text-left w-24 py-3 px-2 font-black whitespace-nowrap">Ins Fee</th>
+                      <th className="text-left w-24 py-3 px-2 font-black whitespace-nowrap">Savings</th>
+                      <th className="text-left w-24 font-black whitespace-nowrap bg-gray-200/50">Total</th>
+                      <th className="text-left min-w-[110px] font-black whitespace-nowrap text-emerald-800 bg-emerald-100/50">Collection</th>
+                      <th className="text-left min-w-[110px] font-black whitespace-nowrap text-rose-800 bg-rose-100/50">Remaining</th>
+                      <th className="text-center w-28 font-black">Status</th>
+                    <th className="w-28 px-4">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border/40">
@@ -825,24 +962,43 @@ availableSchedules[0]?.members?.forEach((m) => {
                     const ch = targetLoanRef?.charges;
                     const totalValue = targetLoanRef ? (ch?.documentFee || 0) + (ch?.insuranceFee || 0) + (ch?.processingFee || 0) + (ch?.savingAmount || 0) : 0;
                     const isMarkedPaid = specificPayMatch !== undefined;
-                    const statusText = totalValue === 0 ? 'NIL' : isMarkedPaid ? 'PAID' : 'PENDING';
-                    const format = (v: any) => v === 0 || !v ? <span className="opacity-30">nil</span> : `₹${v.toLocaleString()}`;
+                    const paidAmount = specificPayMatch?.amountPaid || 0;
+                    const statusText = totalValue === 0 ? 'NIL' : paidAmount >= totalValue - 0.01 ? 'PAID' : paidAmount > 0 ? 'PARTIAL' : 'PENDING';
+                    const format = (v: any) => v === 0 || !v ? <span className="opacity-90 font-black text-foreground">nil</span> : `₹${v.toLocaleString()}`;
 
                     return (
                       <tr key={m.memberId} className={`hover:bg-muted/5 ${!isMarkedPaid && totalValue > 0 ? 'bg-rose-50/10' : ''}`}>
                         <td className="text-center opacity-70 font-mono font-semibold">{(idx+1).toString().padStart(2, '0')}</td>
                         <td className="font-black uppercase text-foreground">{m.memberName}</td>
-                        <td className="text-right opacity-70"> {format(ch?.processingFee)} </td>
-                        <td className="text-right opacity-70"> {format(ch?.documentFee)} </td>
-                        <td className="text-right opacity-70"> {format(ch?.insuranceFee)} </td>
-                        <td className="text-right opacity-70"> {format(ch?.savingAmount)} </td>
-                        <td className="text-right font-black text-primary">₹{totalValue.toLocaleString()}</td>
+                        <td className="text-left opacity-70"> {format(ch?.processingFee)} </td>
+                        <td className="text-left opacity-70"> {format(ch?.documentFee)} </td>
+                        <td className="text-left opacity-70"> {format(ch?.insuranceFee)} </td>
+                        <td className="text-left opacity-70"> {format(ch?.savingAmount)} </td>
+                        <td className="text-left font-black text-primary">₹{totalValue.toLocaleString()}</td>
+                        <td className="text-left p-1 bg-emerald-50/20">
+                          <Input 
+                            type="number"
+                            placeholder="0"
+                            className="h-8 w-24 text-[11px] font-black border-emerald-200 focus:ring-emerald-500"
+                            value={chargeInputs[m.memberId] || ""}
+                            onChange={(e) => setChargeInputs(prev => ({ ...prev, [m.memberId]: e.target.value }))}
+                            disabled={statusText === 'PAID'}
+                          />
+                          <div className="text-[9px] mt-0.5 text-emerald-700 font-bold px-1">
+                            Paid: ₹{(specificPayMatch?.amountPaid || 0).toLocaleString()}
+                          </div>
+                        </td>
+                        <td className="text-left font-black text-rose-600 bg-rose-50/20">
+                          ₹{Math.max(0, totalValue - (specificPayMatch?.amountPaid || 0) - (Number(chargeInputs[m.memberId]) || 0)).toLocaleString()}
+                        </td>
                         <td className="text-center">
                           
 
 <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase border ${
   statusText === 'PAID'
     ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+  : statusText === 'PARTIAL'
+    ? 'bg-amber-100 text-amber-800 border-amber-300'
     : statusText === 'PENDING'
     ? 'bg-rose-100 text-rose-800 border-rose-300'
     : 'bg-gray-200 text-gray-800 border-gray-400'
@@ -851,10 +1007,10 @@ availableSchedules[0]?.members?.forEach((m) => {
 </span>
                         </td>
                         <td className="px-4 py-1.5">
-                          <Button size="sm" variant="outline" className={`h-7 w-full text-[10px] font-black uppercase transition-all ${isMarkedPaid ? 'border-emerald-200 text-emerald-700' : 'border-success text-success hover:bg-success hover:text-white'}`}
-                            disabled={isMarkedPaid || totalValue === 0 || !canPostCharges}
-                            onClick={() => postChargePayment(m.memberId, totalValue)}>
-                            {isMarkedPaid ? 'Cleared' : 'Pay Fees'}
+                          <Button size="sm" variant="outline" className={`h-7 w-full text-[10px] font-black uppercase transition-all ${isMarkedPaid && statusText === 'PAID' ? 'border-emerald-200 text-emerald-700' : 'border-success text-success hover:bg-success hover:text-white'}`}
+                            disabled={(statusText === 'PAID') || totalValue === 0 || !canPostCharges}
+                            onClick={() => postChargePayment(m.memberId)}>
+                            {statusText === 'PAID' ? 'Cleared' : 'Pay Fees'}
                           </Button>
                         </td>
                       </tr>
@@ -905,6 +1061,67 @@ availableSchedules[0]?.members?.forEach((m) => {
                       </div>
                    ))
                 )}
+              </div>
+            </DialogContent>
+          </Dialog>
+          {/* OVERPAYMENT CONFIRMATION DIALOG */}
+          <Dialog open={showOverpaymentConfirm} onOpenChange={setShowOverpaymentConfirm}>
+            <DialogContent className="max-w-md bg-white border-2 border-primary/20 shadow-2xl">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-black uppercase tracking-tight flex items-center gap-2 text-amber-900">
+                  <ShieldAlert className="h-6 w-6 text-amber-600" />
+                  Overpayment Detected
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-2">
+                <p className="text-xs font-bold text-muted-foreground leading-relaxed uppercase tracking-widest text-center opacity-60">
+                  Excess distribution matrix
+                </p>
+                
+                <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                  {overpaymentSummary.map((op, idx) => (
+                    <div key={idx} className="p-3 bg-amber-50/50 border border-amber-200 rounded-lg space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-black text-amber-900 uppercase text-[11px]">{op.memberName}</span>
+                        <span className="text-[9px] font-bold px-2 py-0.5 bg-amber-100 text-amber-700 rounded border border-amber-200">DUE: ₹{op.totalDue.toLocaleString()}</span>
+                      </div>
+                      <div className="space-y-1.5 pl-4 border-l-2 border-amber-300">
+                        {op.distribution.map((d, didx) => (
+                          <div key={didx} className="flex justify-between text-[10px] font-bold">
+                            <span className="text-amber-800 opacity-80 uppercase">Future Inst #{d.installmentNo}</span>
+                            <span className="text-amber-900 font-black">₹{d.amount.toLocaleString()}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="pt-2 flex justify-between items-center border-t border-amber-200">
+                        <span className="text-[10px] font-black uppercase text-amber-600">Total Surplus</span>
+                        <span className="font-black text-amber-700 text-sm tabular-nums">₹{op.excess.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-col gap-2 pt-4">
+                   <Button 
+                     className="w-full h-10 font-black uppercase tracking-wider bg-amber-600 hover:bg-amber-700 text-white shadow-md"
+                     onClick={() => handleSaveCollection(pendingPayments)}
+                     disabled={loading}
+                   >
+                     {loading ? "COMMITTING..." : "Confirm & Pay Next Inst"}
+                   </Button>
+                   <Button 
+                     variant="ghost" 
+                     className="w-full h-10 font-bold uppercase tracking-wider text-muted-foreground hover:text-rose-600 hover:bg-rose-50"
+                     onClick={() => {
+                        setShowOverpaymentConfirm(false);
+                        setOverpaymentSummary([]);
+                        setPendingPayments([]);
+                     }}
+                     disabled={loading}
+                   >
+                     Discard (Let me correct)
+                   </Button>
+                </div>
               </div>
             </DialogContent>
           </Dialog>

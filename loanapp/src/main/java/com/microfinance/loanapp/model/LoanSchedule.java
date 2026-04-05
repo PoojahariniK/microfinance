@@ -8,7 +8,11 @@ import java.time.LocalDate;
 @Entity
 @Table(
     name = "loan_schedule",
-    uniqueConstraints = @UniqueConstraint(columnNames = {"loan_member_id", "installment_no"})
+    uniqueConstraints = @UniqueConstraint(columnNames = {"loan_member_id", "installment_no"}),
+    indexes = {
+        @Index(name = "idx_due_date", columnList = "dueDate"),
+        @Index(name = "idx_loan_member_id", columnList = "loan_member_id")
+    }
 )
 @Getter
 @Setter

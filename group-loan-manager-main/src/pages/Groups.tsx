@@ -4,8 +4,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Plus, Edit, Users } from "lucide-react";
+import { Plus, Edit, Users, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { toast } from "sonner";
 
 interface Group {
   id: number;
@@ -42,6 +43,8 @@ export default function Groups() {
   const [staffUsers, setStaffUsers] = useState<StaffUser[]>([]);
   const [staffId, setStaffId] = useState<number | null>(null);
 
+  const [search, setSearch] = useState("");
+
   // Members Modal state
   const [membersOpen, setMembersOpen] = useState(false);
   const [selectedGroupName, setSelectedGroupName] = useState("");
@@ -53,6 +56,11 @@ export default function Groups() {
   const [createForm, setCreateForm] = useState({ 
     groupName: "", collectionType: "", collectionDay: "", collectionStaffId: "", status: "ACTIVE" 
   });
+
+  const resetCreateForm = () => {
+    setCreateForm({ groupName: "", collectionType: "", collectionDay: "", collectionStaffId: "", status: "ACTIVE" });
+    setError("");
+  };
 
   // Edit Modal state
   const [editOpen, setEditOpen] = useState(false);
@@ -132,7 +140,7 @@ export default function Groups() {
 
   const handleCreateSubmit = async () => {
     if (!createForm.groupName || !createForm.collectionType || !createForm.collectionDay || !createForm.collectionStaffId) {
-      setError("All fields are required to create a group.");
+      toast.error("All fields are required to create a group.");
       return;
     }
     setError("");
@@ -156,11 +164,12 @@ export default function Groups() {
         throw new Error(msg || "Failed to create group.");
       }
       
-      setCreateForm({ groupName: "", collectionType: "", collectionDay: "", collectionStaffId: "", status: "ACTIVE" });
+      resetCreateForm();
       setCreateOpen(false);
       fetchGroups();
+      toast.success("Group created successfully");
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message);
     }
   };
 
@@ -186,11 +195,11 @@ export default function Groups() {
 
   const handleEditSubmit = async () => {
     if (!editForm.groupName || !editForm.collectionType || !editForm.collectionDay) {
-      setError("Fields cannot be empty.");
+      toast.error("Fields cannot be empty.");
       return;
     }
     if (isAdmin && !editForm.collectionStaffId) {
-      setError("Collector must be assigned.");
+      toast.error("Collector must be assigned.");
       return;
     }
 
@@ -218,18 +227,24 @@ export default function Groups() {
       
       setEditOpen(false);
       fetchGroups();
+      toast.success("Group updated successfully");
     } catch (err: any) {
-      setError(err.message);
+      toast.error(err.message);
     }
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="page-header mb-0">Groups</h2>
-        
+      <h2 className="page-header mb-0">Groups</h2>
+      
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-muted/30 p-3 rounded-lg border">
+        <div className="relative w-full sm:max-w-xs">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input placeholder="Search groups..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 bg-background" />
+        </div>
+
         {isAdmin && (
-          <Button size="sm" className="gap-2" onClick={() => setCreateOpen(true)}>
+          <Button size="sm" className="gap-2 shrink-0" onClick={() => setCreateOpen(true)}>
             <Plus className="h-4 w-4" />Add Group
           </Button>
         )}
@@ -257,10 +272,10 @@ export default function Groups() {
           <tbody>
             {loading ? (
               <tr><td colSpan={7} className="text-center py-4 text-muted-foreground">Loading groups...</td></tr>
-            ) : groups.length === 0 ? (
+            ) : groups.filter(g => g.groupName?.toLowerCase().includes(search.toLowerCase()) || g.id.toString().includes(search)).length === 0 ? (
               <tr><td colSpan={7} className="text-center py-4 text-muted-foreground">No groups found.</td></tr>
             ) : (
-              groups.map(g => (
+              groups.filter(g => g.groupName?.toLowerCase().includes(search.toLowerCase()) || g.id.toString().includes(search)).map(g => (
                 <tr key={g.id}>
                   <td className="font-medium">{g.id}</td>
                   <td>{g.groupName || "-"}</td>
@@ -292,7 +307,10 @@ export default function Groups() {
       </div>
 
       {/* CREATE MODAL */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog open={createOpen} onOpenChange={(val) => {
+        if (!val) resetCreateForm();
+        setCreateOpen(val);
+      }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Add New Group</DialogTitle></DialogHeader>
           <div className="grid grid-cols-2 gap-4 py-4">

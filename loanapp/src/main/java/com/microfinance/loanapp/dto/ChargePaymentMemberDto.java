@@ -13,5 +13,6 @@ public class ChargePaymentMemberDto {
     private Long memberId;
     private String memberName;
     private Double amountPaid;
+    private Double totalAmount;
     private LocalDate paymentDate;
 }

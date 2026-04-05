@@ -30,6 +30,7 @@ public class LoanCreationService {
     private final LoanScheduleRepository loanScheduleRepository;
     private final LoanChargesRepository loanChargesRepository;
     private final LoanChargePaymentRepository loanChargePaymentRepository;
+    private final ReportService reportService;
 
     // =========================================================
     //  ADMIN VALIDATION
@@ -115,13 +116,49 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Active loan already exists for this group");
         }
 
-        // Collection-day validation (no auto-fix)
+        // Validate startDate
+        if (request.getStartDate() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Start date is required");
+        }
+
+        if (request.getTotalLoanAmount() == null || request.getTotalLoanAmount() <= 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Total loan amount must be positive");
+        }
+
+        if (request.getInterestRate() == null || request.getInterestRate() < 0) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Interest rate cannot be negative");
+        }
+
+        // Vault Limit Validation
+        double availableCash = reportService.getBalanceSheet(LocalDate.of(2000, 1, 1), LocalDate.now().plusDays(1), null).getClosing().getCash();
+        if (request.getTotalLoanAmount() > availableCash) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Insufficient vault funds. Available cash: " + availableCash);
+        }
+
+        // Validate durationMonths (1–200)
+        if (request.getDurationMonths() == null
+                || request.getDurationMonths() <= 0
+                || request.getDurationMonths() > 200) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    "Duration must be between 1 and 200 months");
+        }
+
+        if (request.getCharges() != null) {
+            LoanChargesDto chk = request.getCharges();
+            if ((chk.getProcessingFee() != null && chk.getProcessingFee() < 0) ||
+                (chk.getDocumentFee()   != null && chk.getDocumentFee()   < 0) ||
+                (chk.getInsuranceFee()  != null && chk.getInsuranceFee()  < 0) ||
+                (chk.getSavingAmount()  != null && chk.getSavingAmount()  < 0)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Loan charges cannot be negative");
+            }
+        }
+
+        // Collection-day validation for start date only
         validateCollectionDay(request.getStartDate(), group, "Start date");
 
-        if (request.getEndDate() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
-        }
-        validateCollectionDay(request.getEndDate(), group, "End date");
+        // Compute end date = due date of last installment
+        LocalDate endDate = calculateEndDate(
+                request.getStartDate(), group.getCollectionType(), request.getDurationMonths());
 
         // Member resolution
         List<MemberGroup> allMembers = memberGroupRepository.findByGroup_Id(group.getId());
@@ -146,32 +183,25 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "No ACTIVE members found");
         }
 
-        // Split principal evenly; first member absorbs rounding remainder
-        double split     = Math.floor((request.getTotalLoanAmount() / memberGroups.size()) * 100.0) / 100.0;
-        double remainder = request.getTotalLoanAmount() - (split * memberGroups.size());
+        // Amount is given PER PERSON
+        double principal = Math.floor(request.getTotalLoanAmount());
 
         List<LoanMemberDraftDto> members = new ArrayList<>();
-        boolean first = true;
         for (MemberGroup mg : memberGroups) {
-            double principal = split;
-            if (first) {
-                principal += remainder;
-                first = false;
-            }
             members.add(new LoanMemberDraftDto(
                     mg.getMember().getId(),
                     mg.getMember().getName(),
-                    Math.round(principal * 100.0) / 100.0
+                    round(principal)
             ));
         }
 
         return new LoanDraftDto(
                 group.getId(),
-                request.getTotalLoanAmount(),
+                round(principal * memberGroups.size()), // Set draft total to exact sum
                 request.getInterestRate(),
                 request.getDurationMonths(),
                 request.getStartDate(),
-                request.getEndDate(),
+                endDate,           // system-computed, never from user input
                 members,
                 request.getCharges()
         );
@@ -187,12 +217,11 @@ public class LoanCreationService {
         Group group = groupRepository.findById(draft.getGroupId())
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Group not found"));
 
-        // Re-validate on preview (caller may send any draft)
+        // Validate start date only; recompute end date — never trust incoming draft value
         validateCollectionDay(draft.getStartDate(), group, "Start date");
-        if (draft.getEndDate() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
-        }
-        validateCollectionDay(draft.getEndDate(), group, "End date");
+        LocalDate computedEndDate = calculateEndDate(
+                draft.getStartDate(), group.getCollectionType(), draft.getDurationMonths());
+        draft.setEndDate(computedEndDate);
 
         int total = getTotalInstallments(group.getCollectionType(), draft.getDurationMonths());
 
@@ -202,12 +231,12 @@ public class LoanCreationService {
 
             double totalInterest =
                     (m.getPrincipalAmount() * draft.getInterestRate() / 100.0) *
-                    (draft.getDurationMonths() / 12.0);
+                    draft.getDurationMonths();
             totalInterest = round(totalInterest);
 
             // Floor-based even split; last installment absorbs rounding
-            double pEach = Math.floor((m.getPrincipalAmount() / total) * 100) / 100;
-            double iEach = Math.floor((totalInterest / total) * 100) / 100;
+            double pEach = Math.floor(m.getPrincipalAmount() / total);
+            double iEach = Math.floor(totalInterest / total);
 
             double pRem = round(m.getPrincipalAmount() - (pEach * total));
             double iRem = round(totalInterest - (iEach * total));
@@ -264,12 +293,16 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Active loan already exists");
         }
 
-        // Final validation gate before any persistence
-        validateCollectionDay(draft.getStartDate(), group, "Start date");
-        if (draft.getEndDate() == null) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "End date is required");
+        // Final Vault Limit Validation
+        double availableCash = reportService.getBalanceSheet(LocalDate.of(2000, 1, 1), LocalDate.now().plusDays(1), null).getClosing().getCash();
+        if (draft.getTotalLoanAmount() > availableCash) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Insufficient vault funds to disburse loan. Available cash: " + availableCash);
         }
-        validateCollectionDay(draft.getEndDate(), group, "End date");
+
+        // Final validation gate — start date only; recompute end date authoritatively
+        validateCollectionDay(draft.getStartDate(), group, "Start date");
+        LocalDate computedEndDate = calculateEndDate(
+                draft.getStartDate(), group.getCollectionType(), draft.getDurationMonths());
 
         // Schedule amount validations
         double totalCheck = 0;
@@ -291,7 +324,7 @@ public class LoanCreationService {
             // Total obligation must NOT be reduced
             double interestTotal = round(
                     (m.getPrincipalAmount() * draft.getInterestRate() / 100.0)
-                    * (draft.getDurationMonths() / 12.0)
+                    * draft.getDurationMonths()
             );
             double expectedTotal = round(m.getPrincipalAmount() + interestTotal);
             double actualTotal   = round(
@@ -312,19 +345,26 @@ public class LoanCreationService {
         loan.setInterestRate(draft.getInterestRate());
         loan.setDurationMonths(draft.getDurationMonths());
         loan.setStartDate(draft.getStartDate());
-        loan.setEndDate(draft.getEndDate());
+        loan.setEndDate(computedEndDate);  // always system-computed
         loan.setStatus(LoanStatus.ACTIVE);
         loan.setCreatedAt(LocalDateTime.now());
         loan = loanRepository.save(loan);
 
         // Persist Charges
         if (draft.getCharges() != null) {
+            LoanChargesDto chk = draft.getCharges();
+            if ((chk.getProcessingFee() != null && chk.getProcessingFee() < 0) ||
+                (chk.getDocumentFee()   != null && chk.getDocumentFee()   < 0) ||
+                (chk.getInsuranceFee()  != null && chk.getInsuranceFee()  < 0) ||
+                (chk.getSavingAmount()  != null && chk.getSavingAmount()  < 0)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Loan charges cannot be negative");
+            }
             LoanCharges c = new LoanCharges();
             c.setLoan(loan);
-            c.setProcessingFee(draft.getCharges().getProcessingFee());
-            c.setDocumentFee(draft.getCharges().getDocumentFee());
-            c.setInsuranceFee(draft.getCharges().getInsuranceFee());
-            c.setSavingAmount(draft.getCharges().getSavingAmount());
+            c.setProcessingFee(chk.getProcessingFee());
+            c.setDocumentFee(chk.getDocumentFee());
+            c.setInsuranceFee(chk.getInsuranceFee());
+            c.setSavingAmount(chk.getSavingAmount());
             loanChargesRepository.save(c);
         }
 
@@ -397,13 +437,19 @@ public class LoanCreationService {
 
         // Update charges
         if (request.getCharges() != null) {
+            LoanChargesDto dto = request.getCharges();
+            if ((dto.getProcessingFee() != null && dto.getProcessingFee() < 0) ||
+                (dto.getDocumentFee()   != null && dto.getDocumentFee()   < 0) ||
+                (dto.getInsuranceFee()  != null && dto.getInsuranceFee()  < 0) ||
+                (dto.getSavingAmount()  != null && dto.getSavingAmount()  < 0)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "Loan charges cannot be negative");
+            }
             LoanCharges charges = loanChargesRepository.findByLoan_Id(loanId)
                     .orElseGet(() -> {
                         LoanCharges c = new LoanCharges();
                         c.setLoan(loan);
                         return c;
                     });
-            LoanChargesDto dto = request.getCharges();
             if (dto.getProcessingFee() != null) charges.setProcessingFee(dto.getProcessingFee());
             if (dto.getDocumentFee()   != null) charges.setDocumentFee(dto.getDocumentFee());
             if (dto.getInsuranceFee()  != null) charges.setInsuranceFee(dto.getInsuranceFee());
@@ -435,20 +481,37 @@ public class LoanCreationService {
         LoanMember lm = loanMemberRepository.findByLoan_IdAndMember_Id(loanId, request.getMemberId())
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Member must belong to loan"));
 
-        if (loanChargePaymentRepository.existsByLoan_IdAndMember_Id(loanId, request.getMemberId())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Member has already paid the charge");
-        }
-
-        if (request.getAmountPaid() == null || request.getAmountPaid() <= 0) {
+        double incomingAmount = request.getAmountPaid();
+        if (incomingAmount <= 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be greater than 0");
         }
 
-        LoanChargePayment payment = new LoanChargePayment();
-        payment.setLoan(loan);
-        payment.setMember(lm.getMember());
-        payment.setAmountPaid(request.getAmountPaid());
+        LoanChargePayment payment = loanChargePaymentRepository
+                .findByLoan_IdAndMember_Id(loanId, request.getMemberId())
+                .orElseGet(() -> {
+                   LoanChargePayment p = new LoanChargePayment();
+                   p.setLoan(loan);
+                   p.setMember(lm.getMember());
+                   p.setAmountPaid(0.0);
+                   p.setCreatedAt(LocalDateTime.now());
+                   return p;
+                });
+
+        LoanCharges charges = loanChargesRepository.findByLoan_Id(loanId)
+                .orElse(new LoanCharges());
+
+        double totalCharges = (charges.getProcessingFee() != null ? charges.getProcessingFee() : 0.0) +
+                              (charges.getDocumentFee()   != null ? charges.getDocumentFee()   : 0.0) +
+                              (charges.getInsuranceFee()  != null ? charges.getInsuranceFee()  : 0.0) +
+                              (charges.getSavingAmount()  != null ? charges.getSavingAmount()  : 0.0);
+
+        if (payment.getAmountPaid() + incomingAmount > totalCharges + 0.01) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "Payment exceeds total charges");
+        }
+
+        payment.setAmountPaid(payment.getAmountPaid() + incomingAmount);
+        payment.setTotalAmount(totalCharges);
         payment.setPaymentDate(LocalDate.now());
-        payment.setCreatedAt(LocalDateTime.now());
         loanChargePaymentRepository.save(payment);
 
         return "Payment successful";
@@ -487,6 +550,7 @@ public class LoanCreationService {
                 p.getMember().getId(),
                 p.getMember().getName(),
                 p.getAmountPaid(),
+                p.getTotalAmount(),
                 p.getPaymentDate()
         )).collect(Collectors.toList());
     }
@@ -572,7 +636,7 @@ public class LoanCreationService {
         // Total obligation must NOT be reduced
         double interestTotal = round(
                 (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
-                * (ctx.loan().getDurationMonths() / 12.0)
+                * ctx.loan().getDurationMonths()
         );
         double expectedTotal = round(ctx.principalAmount() + interestTotal);
         double actualTotal   = round(
@@ -970,11 +1034,12 @@ public class LoanCreationService {
 
     /**
      * Builds schedule DTOs for a new member joining an active loan.
-     *
-     * Rule §4 — Redistribute interest over REMAINING installments (not total).
-     *   totalInterest = principal × rate × (fullDuration / 12)  (full duration, not reduced)
-     *   pEach = principal / remaining
-     *   iEach = totalInterest / remaining
+     * Rule §4 — Redistribute interest over REMAINING installments.
+     *   Rate is MONTHLY: totalInterest = principal × (rate/100) × durationMonths
+     *   base per installment = totalInterest / totalInstallments
+     *   missed = passedInstallments × base  →  redistributed over remaining
+     *   Net: pEach = principal / remaining,  iEach = totalInterest / remaining
+     *   (mathematically equivalent to the redistribute-missed approach)
      *
      * Rule §5 — Due dates must match the exact cycle of existing members.
      *   Start from loan.startDate, skip 'passed' intervals, then generate remaining.
@@ -982,15 +1047,25 @@ public class LoanCreationService {
      */
     private List<AddMemberScheduleDto> buildScheduleDtos(AddMemberContext ctx) {
 
-        // Full-duration interest; redistributed over remaining installments (Rule §4.2, §4.4)
+        // Full-duration interest using monthly rate
         double totalInterest = round(
                 (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
-                * (ctx.loan().getDurationMonths() / 12.0)
+                * ctx.loan().getDurationMonths()
         );
 
-        double pEach = Math.floor((ctx.principalAmount() / ctx.remaining()) * 100.0) / 100.0;
-        double iEach = Math.floor((totalInterest / ctx.remaining()) * 100.0) / 100.0;
+        // Base calculation as if present from start
+        double basePEach = Math.floor(ctx.principalAmount() / ctx.totalInstallments());
+        double baseIEach = Math.floor(totalInterest / ctx.totalInstallments());
 
+        // Calculate missed portions
+        double missedP = basePEach * ctx.passedInstallments();
+        double missedI = baseIEach * ctx.passedInstallments();
+
+        // Target amounts per remaining schedule
+        double pEach = basePEach + Math.floor(missedP / ctx.remaining());
+        double iEach = baseIEach + Math.floor(missedI / ctx.remaining());
+
+        // Remaining balance goes to last installment (handles any rounding diffs)
         double pRem = round(ctx.principalAmount() - (pEach * ctx.remaining()));
         double iRem = round(totalInterest - (iEach * ctx.remaining()));
 
@@ -1040,8 +1115,22 @@ public class LoanCreationService {
         };
     }
 
+    /**
+     * Computes the end date as the due date of the last installment.
+     * Installment 1 is due on startDate; each subsequent installment
+     * advances by one collection interval.
+     */
+    private LocalDate calculateEndDate(LocalDate startDate, CollectionType type, int durationMonths) {
+        int total = getTotalInstallments(type, durationMonths);
+        LocalDate date = startDate;
+        for (int i = 1; i < total; i++) {
+            date = advanceDate(date, type);
+        }
+        return date; // due date of the last installment
+    }
+
     private double round(double v) {
-        return Math.round(v * 100.0) / 100.0;
+        return Math.round(v);
     }
 
     /**

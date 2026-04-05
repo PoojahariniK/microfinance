@@ -17,97 +17,120 @@ public class ReportController {
 
     private final ReportService reportService;
 
-    // API 1: Summary Dashboard
-    @GetMapping("/summary")
-    public ResponseEntity<SummaryReportDto> getSummary() {
-        return ResponseEntity.ok(reportService.getSummary());
+    @GetMapping("/balance-sheet")
+    public ResponseEntity<BalanceSheetReportDto> getBalanceSheet(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) Long groupId) {
+        return ResponseEntity.ok(reportService.getBalanceSheet(startDate, endDate, groupId));
     }
 
-    // API 2: Due-Wise Report
-    @GetMapping("/due-wise")
-    public ResponseEntity<DueWiseReportDto> getDueWiseReport(
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
-        return ResponseEntity.ok(reportService.getDueWiseReport(date));
+    @GetMapping("/profit-loss")
+    public ResponseEntity<ProfitLossReportDto> getProfitLoss(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) Long groupId,
+            @RequestParam(defaultValue = "MONTHLY") String viewType) {
+        return ResponseEntity.ok(reportService.getProfitLoss(startDate, endDate, groupId, viewType));
     }
 
-    // API 3: Pending Report
-    @GetMapping("/pending")
-    public ResponseEntity<List<PendingReportDto>> getPendingReport(
+    // 1. Executive Dashboard (Portfolio - NO DATE)
+    @GetMapping("/dashboard")
+    public ResponseEntity<DashboardReportDto> getDashboard(
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) String status) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getDashboardReport(gId, status));
+    }
+
+    // 1.1 Dashboard Trends (DATE BASED)
+    @GetMapping("/dashboard-trends")
+    public ResponseEntity<List<TrendDto>> getDashboardTrends(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
             @RequestParam(required = false) String groupId) {
-        Long id = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
-        return ResponseEntity.ok(reportService.getPendingReport(id));
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getDashboardTrends(startDate, endDate, gId));
     }
 
-    // API 4: Member Report
-    @GetMapping("/member/{memberId}")
-    public ResponseEntity<MemberReportDto> getMemberReport(
-            @PathVariable Long memberId) {
-        return ResponseEntity.ok(reportService.getMemberReport(memberId));
-    }
-
-    // API 5: Group Report
-    @GetMapping("/group/{groupId}")
-    public ResponseEntity<GroupReportDto> getGroupReport(
-            @PathVariable Long groupId) {
-        return ResponseEntity.ok(reportService.getGroupReport(groupId));
-    }
-
+    // 2. Group Performance Report
     @GetMapping("/groups")
-    public ResponseEntity<List<GroupReportDto>> getAllGroupsReport() {
-        return ResponseEntity.ok(reportService.getAllGroupsReport());
+    public ResponseEntity<List<GroupPerformanceReportDto>> getGroupPerformance(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) String riskLevel) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getGroupPerformance(startDate, endDate, gId, riskLevel));
     }
 
-    // API 6: Interest Report
-    @GetMapping("/interest")
-    public ResponseEntity<InterestReportDto> getInterestReport() {
-        return ResponseEntity.ok(reportService.getInterestReport());
+    // 3. Loan Performance Report
+    @GetMapping("/loans")
+    public ResponseEntity<List<LoanPerformanceReportDto>> getLoanPerformance(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) String status) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getLoanPerformance(startDate, endDate, gId, status));
     }
 
-    // API 7: Loan History
-    @GetMapping("/loan-history")
-    public ResponseEntity<List<LoanHistoryDto>> getLoanHistory(
+    // 4. Member Performance Report
+    @GetMapping("/members")
+    public ResponseEntity<List<MemberPerformanceReportDto>> getMemberPerformance(
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) String status) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getMemberPerformance(gId, status));
+    }
+
+    // 5. Collection / Due Report
+    @GetMapping("/collection-due")
+    public ResponseEntity<CollectionDueReportDto> getCollectionDue(
+            @RequestParam(required = false) Long loanId,
+            @RequestParam(required = false) Integer installmentNo,
+            @RequestParam(required = false) String status) {
+        return ResponseEntity.ok(reportService.getCollectionDue(loanId, installmentNo, status));
+    }
+
+    @GetMapping("/installment-numbers")
+    public ResponseEntity<List<Integer>> getInstallmentNumbers(@RequestParam Long loanId) {
+        return ResponseEntity.ok(reportService.getInstallmentNumbers(loanId));
+    }
+
+    // 6. Outstanding & Overdue Report
+    @GetMapping("/outstanding")
+    public ResponseEntity<List<OutstandingOverdueReportDto>> getOutstandingOverdue(
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) String riskLevel,
+            @RequestParam(required = false) String agingBucket) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getOutstandingOverdue(gId, riskLevel, agingBucket));
+    }
+
+    // 7. Loan Ledger
+    @GetMapping("/ledger")
+    public ResponseEntity<List<LoanLedgerReportDto>> getLoanLedger(
+            @RequestParam(required = false) String groupId,
+            @RequestParam(required = false) Long loanId,
+            @RequestParam(required = false) Long memberId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate) {
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getLoanLedger(gId, loanId, memberId, startDate, endDate));
+    }
+
+    // 8. Financial Statement
+    @GetMapping("/financials")
+    public ResponseEntity<FinancialStatementReportDto> getFinancialStatement(
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
             @RequestParam(required = false) String groupId) {
-        Long id = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
-        return ResponseEntity.ok(reportService.getLoanHistory(id));
+        Long gId = (groupId == null || "ALL".equalsIgnoreCase(groupId)) ? null : Long.parseLong(groupId);
+        return ResponseEntity.ok(reportService.getFinancialStatement(startDate, endDate, gId));
     }
 
-    // API 8a: Weekly Report
-    @GetMapping("/weekly")
-    public ResponseEntity<PeriodReportDto> getWeeklyReport(
-            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate) {
-        return ResponseEntity.ok(reportService.getWeeklyReport(startDate));
-    }
-
-    // API 8: Trend Report (Last 6 Months)
-    @GetMapping("/trend")
-    public ResponseEntity<List<PeriodReportDto>> getTrend() {
-        return ResponseEntity.ok(reportService.getTrendReport());
-    }
-
-    // API 8b: Monthly Report
-    @GetMapping("/monthly")
-    public ResponseEntity<PeriodReportDto> getMonthlyReport(
-            @RequestParam(required = false) Integer year,
-            @RequestParam(required = false) Integer month) {
-        if (year == null) year = LocalDate.now().getYear();
-        if (month == null) month = LocalDate.now().getMonthValue();
-        return ResponseEntity.ok(reportService.getMonthlyReport(year, month));
-    }
-
-    // API 8c: Yearly Report
-    @GetMapping("/yearly")
-    public ResponseEntity<PeriodReportDto> getYearlyReport(
-            @RequestParam int year) {
-        return ResponseEntity.ok(reportService.getYearlyReport(year));
-    }
-
-    // API 9: P&L Report
-    @GetMapping("/pnl")
-    public ResponseEntity<PnlReportDto> getPnlReport() {
-        return ResponseEntity.ok(reportService.getPnlReport());
-    }
-
-    // API 10: Recent Activity
+    // 9. Activity (Home Dashboard Helper)
     @GetMapping("/activity")
     public ResponseEntity<ActivityReportDto> getActivity() {
         return ResponseEntity.ok(reportService.getRecentActivity());

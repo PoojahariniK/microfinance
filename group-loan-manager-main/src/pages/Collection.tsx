@@ -257,7 +257,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           if (amountToApply <= 0) continue;
         }
 
-        const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+        const memberId = m.memberId;
 
         // TOTAL LOAN REMAINING BALANCE CALCULATION
         let totalRemainingLoanAmount = 0;

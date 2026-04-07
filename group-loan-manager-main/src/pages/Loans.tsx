@@ -19,6 +19,7 @@ interface GroupData {
   id: number;
   groupName: string;
   collectionType: string;
+  collectionDay?: string;
 }
 
 interface Member {
@@ -338,6 +339,22 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setError("");
 
     try {
+      // Validation: Start Date must match Collection Day for WEEKLY/BIWEEKLY
+      if (selectedGroup && (selectedGroup.collectionType === "WEEKLY" || selectedGroup.collectionType === "BIWEEKLY")) {
+        const groupDay = selectedGroup.collectionDay; 
+        if (groupDay) {
+          const selectedDate = new Date(startDate);
+          // Use 'en-US' for day name comparison (MONDAY, etc)
+          const selectedDayName = selectedDate.toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
+          
+          if (selectedDayName !== groupDay.toUpperCase()) {
+             toast.error(`Start date must be a ${groupDay}`);
+             setLoading(false);
+             return;
+          }
+        }
+      }
+
       const res = await fetch(`${API_BASE}/api/loans/init`, {
         method: "POST",
         headers: { 
@@ -506,21 +523,27 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const handleAddMemberConfirm = async () => {
     if (!addMemberDraft || !targetLoanId || !user) return;
     
-    const currentP = Number(addMemberSchedule.reduce((sum, s) => sum + s.principal, 0).toFixed(2));
-    const currentI = Number(addMemberSchedule.reduce((sum, s) => sum + s.interest, 0).toFixed(2));
-    const currentTotal = Number((currentP + currentI).toFixed(2));
-    const expectedTotal = Number((expectedAddMemberPrincipal + expectedAddMemberInterest).toFixed(2));
+    const currentP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
+    const currentI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
+    const currentTotal = currentP + currentI;
+    const expectedTotal = expectedAddMemberPrincipal + expectedAddMemberInterest;
 
     if (Math.abs(currentP - expectedAddMemberPrincipal) > 0.1) {
-       toast.error(`Principal Mismatch: Total must be ₹${expectedAddMemberPrincipal.toLocaleString()}. Currently: ₹${currentP.toLocaleString()}`);
+       const diff = Math.abs(currentP - expectedAddMemberPrincipal);
+       const direction = currentP > expectedAddMemberPrincipal ? "High" : "Low";
+       toast.error(`Principal Mismatch: Total must be ₹${expectedAddMemberPrincipal.toLocaleString()}. Currently: ₹${currentP.toLocaleString()} (${direction} by ₹${diff.toLocaleString()})`);
        return;
     }
     if (Math.abs(currentI - expectedAddMemberInterest) > 0.1) {
-       toast.error(`Interest Mismatch: Total must be ₹${expectedAddMemberInterest.toLocaleString()}. Currently: ₹${currentI.toLocaleString()}`);
+       const diff = Math.abs(currentI - expectedAddMemberInterest);
+       const direction = currentI > expectedAddMemberInterest ? "High" : "Low";
+       toast.error(`Interest Mismatch: Total must be ₹${expectedAddMemberInterest.toLocaleString()}. Currently: ₹${currentI.toLocaleString()} (${direction} by ₹${diff.toLocaleString()})`);
        return;
     }
     if (Math.abs(currentTotal - expectedTotal) > 0.1) {
-       toast.error(`Total Mismatch: Combined total must be ₹${expectedTotal.toLocaleString()}. Currently: ₹${currentTotal.toLocaleString()}`);
+       const diff = Math.abs(currentTotal - expectedTotal);
+       const direction = currentTotal > expectedTotal ? "High" : "Low";
+       toast.error(`Total Mismatch: Combined total must be ₹${expectedTotal.toLocaleString()}. Currently: ₹${currentTotal.toLocaleString()} (${direction} by ₹${diff.toLocaleString()})`);
        return;
     }
 
@@ -693,54 +716,28 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setTargetLoanMemberIds([]);
   };
 
-  // Redistribution logic for Add Member
   const handleAdminTargetChange = (newTarget: number) => {
     setAddMemberAdminTarget(newTarget);
     if (!addMemberSchedule.length) return;
     
-    const rowCount = addMemberSchedule.length;
-    
-    // Total interest and principal for this member
+    // Total interest and principal ratio for this member
     const totalP = expectedAddMemberPrincipal;
     const totalI = expectedAddMemberInterest;
     const overallTotal = totalP + totalI;
-    
-    const updated = [...addMemberSchedule];
-    
-    // To follow the "equal spread" logic, we distribute the total as evenly as possible.
-    // If the user specified a target, we'll still use it as a base but adjust all rows equally to hit the total.
-    // Effectively, for an "equal spread", all rows should be (OverallTotal / count).
-    const targetValue = newTarget > 0 ? newTarget : (overallTotal / rowCount);
-    
     const ratioP = totalP / (overallTotal || 1);
-    const pEach = Number((targetValue * ratioP).toFixed(2));
-    const iEach = Number((targetValue - pEach).toFixed(2));
-
-    let accP = 0;
-    let accI = 0;
     
-    for (let i = 0; i < rowCount; i++) {
-        if (i === rowCount - 1) {
-            // Last row takes the remainder
-            const lastP = Number((totalP - accP).toFixed(2));
-            const lastI = Number((totalI - accI).toFixed(2));
-            updated[i] = { 
-                ...updated[i], 
-                principal: lastP, 
-                interest: lastI, 
-                total: Number((lastP + lastI).toFixed(2)) 
-            };
-        } else {
-            updated[i] = { 
-                ...updated[i], 
-                principal: pEach, 
-                interest: iEach, 
-                total: Number((pEach + iEach).toFixed(2)) 
-            };
-            accP = Number((accP + pEach).toFixed(2));
-            accI = Number((accI + iEach).toFixed(2));
-        }
-    }
+    const updated = addMemberSchedule.map(row => {
+        // Round primary split (Principal) and derive interest to ensure row total equals target
+        const pEach = Math.round(newTarget * ratioP);
+        const iEach = newTarget - pEach;
+        
+        return { 
+            ...row, 
+            principal: pEach, 
+            interest: iEach, 
+            total: newTarget 
+        };
+    });
     
     setAddMemberSchedule(updated);
   };
@@ -784,7 +781,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                                <div className="flex gap-2">
                                   <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-bold uppercase tracking-tight">Type: {selectedGroup.collectionType}</span>
                                   {selectedGroup.collectionType !== 'DAILY' && selectedGroup.collectionType !== 'MONTHLY' && (
-                                     <span className="text-[10px] bg-warning/10 text-warning-foreground px-1.5 py-0.5 rounded font-bold uppercase tracking-tight">Day: {groups.find(g => g.id === selectedGroup.id)?.groupName.split(' (')[1]?.replace(')', '') || 'MONDAY'}</span>
+                                     <span className="text-[10px] bg-amber-500 text-white px-2 py-0.5 rounded font-bold uppercase shadow-sm">Day: {selectedGroup.collectionDay || "MONDAY"}</span>
                                   )}
                                </div>
                             )}
@@ -836,7 +833,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                         <div className="relative">
                           <Input 
                             type="number" 
-                            className={`h-11 font-black transition-all ${calculationBasis === 'FIXED_RATE' ? 'bg-muted/30 cursor-not-allowed opacity-70' : 'bg-primary/5 focus:ring-2'}`}
+                            className={`h-11 font-black pl-8 transition-all ${calculationBasis === 'FIXED_RATE' ? 'bg-muted/30 cursor-not-allowed opacity-70' : 'bg-primary/5 focus:ring-2'}`}
                             value={dueAmount} 
                             disabled={calculationBasis === 'FIXED_RATE'}
                             onChange={e => {
@@ -1288,8 +1285,13 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                                   if (res.ok) {
                                     const data = await res.json();
                                     if (data.length > 0) {
-                                      const existingIds = data[0].members.map((m: any) => m.memberId);
-                                      setTargetLoanMemberIds(existingIds);
+                                      const allMemberIds = new Set<number>();
+                                      data.forEach((inst: any) => {
+                                        if (inst.members) {
+                                          inst.members.forEach((m: any) => allMemberIds.add(m.memberId));
+                                        }
+                                      });
+                                      setTargetLoanMemberIds(Array.from(allMemberIds));
                                     }
                                   }
                                 } catch (e) {}
@@ -1570,7 +1572,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
             <DialogTitle className="flex items-center gap-2">
               <UserPlus className="h-5 w-5" />
               {addMemberStep === 1 && "Add Member to Loan - Step 1: Select Member"}
-              {addMemberStep === 2 && "Add Member to Loan - Step 2: Review & Catch up Schedule"}
+              {addMemberStep === 2 && "Add Member to Loan - Step 2: Review Schedule"}
               {addMemberStep === 3 && "Add Member to Loan - Success"}
             </DialogTitle>
           </DialogHeader>
@@ -1578,8 +1580,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           {addMemberStep === 1 && (
             <div className="space-y-4 py-4">
               <div className="p-3 bg-muted/50 rounded-md text-xs border">
-                Consolidating missed installments into the first payment of the new member's schedule. 
-                Subsequent installments will follow the standard amount.
+                Review the auto-generated schedule for the new member based on the existing group loan structure.
               </div>
               <div className="space-y-2">
                 <Label className="text-[11px] font-bold uppercase text-muted-foreground mr-1">Select Member from Group</Label>
@@ -1588,7 +1589,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                   <SelectContent>
                     {(() => {
                         const available = groupMembers.filter(m => !targetLoanMemberIds.includes(m.id));
-                        if(available.length === 0) return <SelectItem value="none" disabled>No eligible members remaining</SelectItem>;
+                        if(available.length === 0) return <SelectItem value="none" disabled>no one</SelectItem>;
                         return available.map(m => <SelectItem key={m.id} value={m.id.toString()}>{m.name}</SelectItem>);
                     })()}
                   </SelectContent>
@@ -1677,10 +1678,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                         </thead>
                         <tbody>
                               {addMemberSchedule.map((item, idx) => (
-                                <tr key={item.installmentNo} className={idx === 0 ? "bg-primary/5 border-l-4 border-primary" : ""}>
+                                <tr key={item.installmentNo}>
                                   <td className="text-center font-bold text-primary">
                                     {item.installmentNo}
-                                    {idx === 0 && <span className="block text-[8px] uppercase text-primary/70">Catch up</span>}
                                   </td>
                                   <td>
                                     <Input
@@ -1702,9 +1702,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                                       type="number"
                                       value={item.principal}
                                       onChange={e => {
-                                        const val = Number(e.target.value);
+                                        const val = Math.round(Number(e.target.value));
                                         const updated = [...addMemberSchedule];
-                                        updated[idx] = { ...item, principal: val, total: Number((val + item.interest).toFixed(2)) };
+                                        updated[idx] = { ...item, principal: val, total: val + item.interest };
                                         setAddMemberSchedule(updated);
                                       }}
                                       className="h-7 w-20 text-[11px] border-none focus-visible:ring-1"
@@ -1715,9 +1715,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                                       type="number"
                                       value={item.interest}
                                       onChange={e => {
-                                        const val = Number(e.target.value);
+                                        const val = Math.round(Number(e.target.value));
                                         const updated = [...addMemberSchedule];
-                                        updated[idx] = { ...item, interest: val, total: Number((val + item.principal).toFixed(2)) };
+                                        updated[idx] = { ...item, interest: val, total: val + item.principal };
                                         setAddMemberSchedule(updated);
                                       }}
                                       className="h-7 w-20 text-[11px] border-none focus-visible:ring-1"
@@ -1725,10 +1725,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                                   </td>
                                   <td className="bg-primary/5 font-bold">
                                     <div className="flex items-center gap-1">
-                                       ₹{item.total.toLocaleString()}
-                                       {idx > 0 && Math.abs(item.total - addMemberAdminTarget) > 1 && (
-                                         <AlertTriangle className="h-3 w-3 text-orange-500" />
-                                       )}
+                                       ₹{Math.round(item.total).toLocaleString()}
                                     </div>
                                   </td>
                                 </tr>

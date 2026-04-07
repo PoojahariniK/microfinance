@@ -139,6 +139,7 @@ export interface EditMemberScheduleRequest {
 }
 
 export interface CollectionMemberDto {
+  memberId: number;
   loanScheduleId: number;
   memberName: string;
   principal: number;

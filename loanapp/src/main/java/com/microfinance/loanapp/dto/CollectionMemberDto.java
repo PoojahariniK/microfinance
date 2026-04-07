@@ -4,6 +4,7 @@ import lombok.Data;
 
 @Data
 public class CollectionMemberDto {
+    private Long memberId;
     private Long loanScheduleId;
     private String memberName;
     private Double principal;

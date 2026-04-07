@@ -46,6 +46,7 @@ public class PaymentService {
 
         List<CollectionMemberDto> list = schedules.stream().map(s -> {
             CollectionMemberDto dto = new CollectionMemberDto();
+            dto.setMemberId(s.getLoanMember().getMember().getId());
             dto.setLoanScheduleId(s.getId());
             dto.setMemberName(s.getLoanMember().getMember().getName());
             dto.setPrincipal(s.getPrincipal());

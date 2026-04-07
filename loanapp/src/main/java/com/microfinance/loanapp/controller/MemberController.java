@@ -5,7 +5,6 @@ import com.microfinance.loanapp.service.MemberService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/members")
@@ -35,12 +34,17 @@ public class MemberController {
         return memberService.updateMember(id, request, file, loggedInUser);
     }
 
-    // GET ALL
     @GetMapping
-    public List<MemberResponse> getAllMembers(
+    public PaginatedResponse<MemberResponse> getAllMembers(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search,
             @RequestHeader("loggedInUser") String loggedInUser) {
-
-        return memberService.getAllMembers(loggedInUser);
+        
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
+        return memberService.getAllMembers(page, size, search, loggedInUser);
     }
 
     // GET BY ID
@@ -54,11 +58,17 @@ public class MemberController {
 
     // GET BY GROUP
     @GetMapping("/group/{groupId}")
-    public List<MemberResponse> getMembersByGroup(
+    public PaginatedResponse<MemberResponse> getMembersByGroup(
             @PathVariable Long groupId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search,
             @RequestHeader("loggedInUser") String loggedInUser) {
-
-        return memberService.getMembersByGroup(groupId, loggedInUser);
+        
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
+        return memberService.getMembersByGroup(groupId, page, size, search, loggedInUser);
     }
 
 

@@ -53,6 +53,10 @@ export default function Collection() {
   const [editingPaymentId, setEditingPaymentId] = useState<number | null>(null);
   const [editAmount, setEditAmount] = useState<number>(0);
 
+  // Arrears Modal
+  const [showPreviousUnpaidConfirm, setShowPreviousUnpaidConfirm] = useState(false);
+  const [previousUnpaidWarningList, setPreviousUnpaidWarningList] = useState<{ memberName: string; unpaidInstallments: number[] }[]>([]);
+
   // Loan Charges
   const [chargeStatus, setChargeStatus] = useState<ChargeStatusResponse | null>(null);
   const [paidChargesMembers, setPaidChargesMembers] = useState<ChargePaymentMemberDto[]>([]);
@@ -71,11 +75,11 @@ export default function Collection() {
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
   // 1. Fetch Groups
   useEffect(() => {
-    fetch(`${API_BASE}/api/groups`, {
+    fetch(`${API_BASE}/api/groups?size=50`, {
       headers: { "loggedInUser": user?.username || "" }
     })
-    .then(res => res.ok ? res.json() : [])
-    .then((data: GroupData[]) => setGroups(data))
+    .then(res => res.json())
+    .then(data => setGroups(data.content !== undefined ? data.content : data))
     .catch(() => toast.error("Failed to fetch groups"));
   }, [user]);
 
@@ -107,7 +111,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         headers: { "loggedInUser": user?.username || "" }
       });
       if (res.ok) {
-        const loans: LoanSummaryResponse[] = await res.json();
+        const data = await res.json();
+        const loans: LoanSummaryResponse[] = data.content !== undefined ? data.content : data;
         setActiveLoans(loans?.filter(l => l.status === "ACTIVE") || []);
       }
     } catch (e) { toast.error("Failed to fetch active loans"); }
@@ -118,6 +123,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setSelectedLoanId(loanId);
     setSelectedDueNumber("");
     setCollectionData(null);
+    setChargeInputs({});
     
     try {
       const res = await fetch(`${API_BASE}/api/loans/group/${gid}/loan/${loanId}/schedules`, {
@@ -138,7 +144,19 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           fetch(`${API_BASE}/api/loans/${loanId}/charges/payments`, { headers: { "loggedInUser": user?.username || "" } })
         ]);
         if (statusRes.ok) setChargeStatus(await statusRes.json());
-        if (payRes.ok) setPaidChargesMembers(await payRes.json());
+        if (payRes.ok) {
+          const membersData = await payRes.json();
+          setPaidChargesMembers(membersData);
+          if (adminEditMode) {
+             setChargeInputs(prev => {
+                const next = { ...prev };
+                membersData.forEach((match: any) => {
+                   next[match.memberId] = match.amountPaid.toString();
+                });
+                return next;
+             });
+          }
+        }
       } catch (e) {}
   };
 
@@ -159,7 +177,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         // Clear input field (0) for any installment already has payments (PARTIAL or PAID).
         // Only pre-fill (totalDue) for purely UNPAID installments as a data-entry helper.
         const isActuallyUnpaid = m.status === 'UNPAID' && (m.paidAmount || 0) === 0;
-        overrides[m.loanScheduleId] = isActuallyUnpaid ? m.totalDue : 0;
+        if (adminEditMode) {
+          overrides[m.loanScheduleId] = m.paidAmount || 0;
+        } else {
+          overrides[m.loanScheduleId] = isActuallyUnpaid ? m.totalDue : 0;
+        }
       });
       setEditedEntries(overrides);
     } catch (e: any) {
@@ -175,28 +197,88 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   };
 
   const isRowDisabled = (status: string) => {
-    if (status === "PAID") return true;
+    if (status === "PAID" && !adminEditMode) return true;
     if (!isAuthorized) return true; 
     return false;
   };
 
-  const handleSaveCollection = async (confirmedPayments?: PaymentEntryDto[]) => {
+  const handleSaveCollection = async (confirmedPayments?: PaymentEntryDto[], bypassPreviousCheck: boolean = false) => {
     if (!collectionData) return;
     
     let activePayload: PaymentEntryDto[] = confirmedPayments || [];
     let overpayments: typeof overpaymentSummary = [];
 
-    if (!confirmedPayments) {
-      collectionData?.members?.forEach(m => {
+    if (!confirmedPayments && !bypassPreviousCheck) {
+      const membersWithUnpaidPrevious: { memberName: string; unpaidInstallments: number[] }[] = [];
+      
+      for (const m of collectionData?.members || []) {
         const userVal = editedEntries[m.loanScheduleId];
-        if (!adminEditMode && m.status === "PAID") return;
-        if (userVal <= 0) return;
+        let amountToApply = userVal;
+        if (adminEditMode) amountToApply = userVal - (m.paidAmount || 0);
+        if (amountToApply <= 0) continue;
+
+        const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+        if (memberId) {
+          const unpaidPrevious = availableSchedules.filter(s => 
+            s.installmentNo < collectionData.installmentNo
+          ).map(s => {
+            const memberSched = s.members.find(sm => sm.memberId === memberId);
+            return { installmentNo: s.installmentNo, memberSched };
+          }).filter(s => s.memberSched && s.memberSched.status !== 'PAID');
+
+          if (unpaidPrevious.length > 0) {
+            membersWithUnpaidPrevious.push({
+               memberName: m.memberName,
+               unpaidInstallments: unpaidPrevious.map(s => s.installmentNo)
+            });
+          }
+        }
+      }
+
+      if (membersWithUnpaidPrevious.length > 0) {
+         setPreviousUnpaidWarningList(membersWithUnpaidPrevious);
+         setShowPreviousUnpaidConfirm(true);
+         return; // Suspend execution
+      }
+    }
+
+    if (!confirmedPayments) {
+      let validationError = null;
+
+      for (const m of collectionData?.members || []) {
+        const userVal = editedEntries[m.loanScheduleId];
+        
+        let amountToApply = userVal;
+        if (adminEditMode) {
+          amountToApply = userVal - (m.paidAmount || 0);
+          if (amountToApply === 0) continue;
+        } else {
+          if (m.status === "PAID") continue;
+          if (amountToApply <= 0) continue;
+        }
+
+        const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+
+        // TOTAL LOAN REMAINING BALANCE CALCULATION
+        let totalRemainingLoanAmount = 0;
+        if (memberId) {
+          availableSchedules.forEach(s => {
+             const ms = s.members.find(sm => sm.memberId === memberId);
+             if (ms) {
+                totalRemainingLoanAmount += (ms.total - (ms.paidAmount || 0));
+             }
+          });
+        }
+
+        if (amountToApply > totalRemainingLoanAmount + 0.01) {
+           validationError = `Payment for ${m.memberName} exceeds their overall loan balance. Exceeding by ₹${Math.abs(amountToApply - totalRemainingLoanAmount).toLocaleString()}.`;
+           break;
+        }
 
         const dueRightNow = m.totalDue - (m.paidAmount || 0);
         
-        if (userVal > dueRightNow + 0.01) {
-          const excess = userVal - dueRightNow;
-          const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+        if (amountToApply > dueRightNow + 0.01) {
+          const excess = amountToApply - dueRightNow;
           
           if (memberId) {
             // Find future schedules for this member
@@ -207,13 +289,15 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 const memberSched = s.members.find(sm => sm.memberId === memberId);
                 return { ...s, memberSched };
               })
-              .filter(s => s.memberSched && (s.memberSched.status !== 'PAID'));
+              // Use remaining balance check — more reliable than stale status string
+              .filter(s => {
+                if (!s.memberSched) return false;
+                const remaining = s.memberSched.total - (s.memberSched.paidAmount || 0);
+                return remaining > 0.01;
+              });
 
             let remainingExcess = excess;
             const distribution: typeof overpaymentSummary[0]['distribution'] = [];
-            
-            // Add current installment first
-            activePayload.push({ loanScheduleId: m.loanScheduleId, amount: dueRightNow });
 
             for (const fs of futureSchedules) {
               if (remainingExcess <= 0) break;
@@ -228,10 +312,20 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                   amount: apply, 
                   loanScheduleId: fs.memberSched.loanScheduleId! 
                 });
-                activePayload.push({ loanScheduleId: fs.memberSched.loanScheduleId!, amount: apply });
                 remainingExcess -= apply;
               }
             }
+
+            if (remainingExcess > 0.01) {
+               validationError = `Overpayment for ${m.memberName} lacks sufficient future scheduled installments to absorb the extra funds. Missing capacity: ₹${remainingExcess.toLocaleString()}. Please restrict input.`;
+               break;
+            }
+
+            // Safe to commit locally
+            activePayload.push({ loanScheduleId: m.loanScheduleId, amount: dueRightNow });
+            distribution.forEach(d => {
+               activePayload.push({ loanScheduleId: d.loanScheduleId, amount: d.amount });
+            });
 
             if (distribution.length > 0) {
               overpayments.push({
@@ -240,16 +334,17 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 excess: excess,
                 distribution
               });
-            } else {
-              // If no future installments found, we still treat it as trying to pay more
-              // But we can't distribute it. The backend will reject it anyway.
-              activePayload.push({ loanScheduleId: m.loanScheduleId, amount: userVal });
             }
           }
         } else {
-          activePayload.push({ loanScheduleId: m.loanScheduleId, amount: userVal });
+          activePayload.push({ loanScheduleId: m.loanScheduleId, amount: amountToApply });
         }
-      });
+      }
+
+      if (validationError) {
+         toast.error(validationError);
+         return; // Aborts sync completely
+      }
     }
 
     if (overpayments.length > 0) {
@@ -270,7 +365,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           loanId: Number(selectedLoanId),
           installmentNo: Number(selectedDueNumber),
           paymentDate: new Date().toISOString().split('T')[0],
-          payments: activePayload
+          payments: activePayload,
+          bypassPreviousCheck: bypassPreviousCheck
        };
        const res = await fetch(`${API_BASE}/api/payments/collect`, {
          method: "POST",
@@ -292,6 +388,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
        await handleDueChange(selectedDueNumber);
        setShowOverpaymentConfirm(false);
+       setPreviousUnpaidWarningList([]);
     } catch (e: any) {
        toast.error(e.message || "Failed to commit payments");
     } finally {
@@ -332,23 +429,31 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const postChargePayment = async (memberId: number) => {
       try {
         const inputVal = chargeInputs[memberId];
-        const amount = Number(inputVal);
-        
-        if (!inputVal || isNaN(amount) || amount <= 0) {
-          toast.error("Please enter a valid payment amount");
-          return;
-        }
+        let amountToApply = Number(inputVal);
 
         const payMatch = paidChargesMembers.find(p => p.memberId === memberId);
         const existing = payMatch?.amountPaid || 0;
         const totalValue = payMatch?.totalAmount || 0;
+
+        if (adminEditMode) {
+          amountToApply = amountToApply - existing;
+          if (amountToApply === 0) {
+            toast.error("No changes made");
+            return;
+          }
+        }
+        
+        if (!inputVal || isNaN(amountToApply) || (!adminEditMode && amountToApply <= 0)) {
+          toast.error("Please enter a valid payment amount");
+          return;
+        }
         
         // Fallback total calculation if backend field is missing
         const ch = targetLoanRef?.charges;
         const fallbackTotal = (ch?.documentFee || 0) + (ch?.insuranceFee || 0) + (ch?.processingFee || 0) + (ch?.savingAmount || 0);
         const effectiveTotal = totalValue || fallbackTotal;
 
-        if (existing + amount > effectiveTotal + 0.01) {
+        if (!adminEditMode && existing + amountToApply > effectiveTotal + 0.01) {
           toast.error(`Payment exceeds remaining balance (₹${(effectiveTotal - existing).toLocaleString()})`);
           return;
         }
@@ -356,7 +461,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         const res = await fetch(`${API_BASE}/api/loans/${selectedLoanId}/charges/pay`, {
           method: "POST",
           headers: { "Content-Type": "application/json", "loggedInUser": user?.username || "" },
-          body: JSON.stringify({ memberId, amountPaid: amount })
+          body: JSON.stringify({ memberId, amountPaid: amountToApply })
         });
         
         if (!res.ok) throw new Error(await res.text());
@@ -802,7 +907,34 @@ availableSchedules[0]?.members?.forEach((m) => {
                  <h4 className="text-[11px] font-black text-amber-900 uppercase">Admin Override Active</h4>
                  <p className="text-[10px] text-amber-700 mt-0.5">Historical edit mode engaged. This unlocks strictly locked PAID records for correction.</p>
                </div>
-               <Switch checked={adminEditMode} onCheckedChange={setAdminEditMode} className="data-[state=checked]:bg-amber-600" />
+               <Switch checked={adminEditMode} onCheckedChange={(checked) => {
+                  setAdminEditMode(checked);
+                  if (collectionData) {
+                    const overrides = { ...editedEntries };
+                    collectionData.members.forEach(m => {
+                      if (checked) {
+                        overrides[m.loanScheduleId] = m.paidAmount || 0;
+                      } else {
+                        const isActuallyUnpaid = m.status === 'UNPAID' && (m.paidAmount || 0) === 0;
+                        overrides[m.loanScheduleId] = isActuallyUnpaid ? m.totalDue : 0;
+                      }
+                    });
+                    setEditedEntries(overrides);
+                  }
+                  
+                  if (availableSchedules.length > 0 && availableSchedules[0]?.members) {
+                    const newCharges = { ...chargeInputs };
+                    availableSchedules[0].members.forEach(m => {
+                      if (checked) {
+                        const match = paidChargesMembers.find(p => p.memberId === m.memberId);
+                        newCharges[m.memberId] = match ? match.amountPaid.toString() : "0";
+                      } else {
+                        newCharges[m.memberId] = "";
+                      }
+                    });
+                    setChargeInputs(newCharges);
+                  }
+               }} className="data-[state=checked]:bg-amber-600" />
             </div>
           )}
 
@@ -982,7 +1114,7 @@ availableSchedules[0]?.members?.forEach((m) => {
                             className="h-8 w-24 text-[11px] font-black border-emerald-200 focus:ring-emerald-500"
                             value={chargeInputs[m.memberId] || ""}
                             onChange={(e) => setChargeInputs(prev => ({ ...prev, [m.memberId]: e.target.value }))}
-                            disabled={statusText === 'PAID'}
+                            disabled={statusText === 'PAID' && !adminEditMode}
                           />
                           <div className="text-[9px] mt-0.5 text-emerald-700 font-bold px-1">
                             Paid: ₹{(specificPayMatch?.amountPaid || 0).toLocaleString()}
@@ -1007,10 +1139,10 @@ availableSchedules[0]?.members?.forEach((m) => {
 </span>
                         </td>
                         <td className="px-4 py-1.5">
-                          <Button size="sm" variant="outline" className={`h-7 w-full text-[10px] font-black uppercase transition-all ${isMarkedPaid && statusText === 'PAID' ? 'border-emerald-200 text-emerald-700' : 'border-success text-success hover:bg-success hover:text-white'}`}
-                            disabled={(statusText === 'PAID') || totalValue === 0 || !canPostCharges}
+                          <Button size="sm" variant="outline" className={`h-7 w-full text-[10px] font-black uppercase transition-all ${isMarkedPaid && statusText === 'PAID' && !adminEditMode ? 'border-emerald-200 text-emerald-700' : adminEditMode ? 'border-amber-500 text-amber-600 hover:bg-amber-500 hover:text-white' : 'border-success text-success hover:bg-success hover:text-white'}`}
+                            disabled={(statusText === 'PAID' && !adminEditMode) || totalValue === 0 || !canPostCharges}
                             onClick={() => postChargePayment(m.memberId)}>
-                            {statusText === 'PAID' ? 'Cleared' : 'Pay Fees'}
+                            {statusText === 'PAID' ? (adminEditMode ? 'Update' : 'Cleared') : 'Pay Fees'}
                           </Button>
                         </td>
                       </tr>
@@ -1064,6 +1196,60 @@ availableSchedules[0]?.members?.forEach((m) => {
               </div>
             </DialogContent>
           </Dialog>
+
+          {/* PREVIOUS UNPAID ARREARS WARNING DIALOG */}
+          <Dialog open={showPreviousUnpaidConfirm} onOpenChange={setShowPreviousUnpaidConfirm}>
+            <DialogContent className="max-w-md bg-white border-2 border-rose-500/20 shadow-2xl">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-black uppercase tracking-tight flex items-center gap-2 text-rose-700">
+                  <ShieldAlert className="h-6 w-6 text-rose-600" />
+                  Past Dues Detected
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-2">
+                <p className="text-sm font-bold text-muted-foreground leading-relaxed">
+                  Are you sure you want to collect an advanced installment while past dues exist for these members?
+                </p>
+                
+                <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+                  {previousUnpaidWarningList.map((warn, idx) => (
+                    <div key={idx} className="p-3 bg-rose-50/50 border border-rose-200 rounded-lg space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-black text-rose-900 uppercase text-xs">{warn.memberName}</span>
+                      </div>
+                      <div className="space-y-1.5 pl-4 border-l-2 border-rose-300">
+                        <div className="text-[10px] font-bold text-rose-800 opacity-80 uppercase">
+                          Missing Installments: {warn.unpaidInstallments.join(", ")}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-col gap-2 pt-4">
+                   <Button 
+                     className="w-full h-10 font-black uppercase tracking-wider bg-rose-600 hover:bg-rose-700 text-white shadow-md"
+                     onClick={() => {
+                        setShowPreviousUnpaidConfirm(false);
+                        handleSaveCollection(undefined, true);
+                     }}
+                     disabled={loading}
+                   >
+                     {loading ? "PROCESSING..." : "Yes, Proceed"}
+                   </Button>
+                   <Button 
+                     variant="ghost" 
+                     className="w-full h-10 font-bold uppercase tracking-wider text-muted-foreground hover:text-gray-600 hover:bg-gray-50"
+                     onClick={() => setShowPreviousUnpaidConfirm(false)}
+                     disabled={loading}
+                   >
+                     Cancel
+                   </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+
           {/* OVERPAYMENT CONFIRMATION DIALOG */}
           <Dialog open={showOverpaymentConfirm} onOpenChange={setShowOverpaymentConfirm}>
             <DialogContent className="max-w-md bg-white border-2 border-primary/20 shadow-2xl">
@@ -1104,7 +1290,7 @@ availableSchedules[0]?.members?.forEach((m) => {
                 <div className="flex flex-col gap-2 pt-4">
                    <Button 
                      className="w-full h-10 font-black uppercase tracking-wider bg-amber-600 hover:bg-amber-700 text-white shadow-md"
-                     onClick={() => handleSaveCollection(pendingPayments)}
+                     onClick={() => handleSaveCollection(pendingPayments, previousUnpaidWarningList.length > 0)}
                      disabled={loading}
                    >
                      {loading ? "COMMITTING..." : "Confirm & Pay Next Inst"}

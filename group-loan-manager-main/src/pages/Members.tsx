@@ -8,6 +8,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Plus, Search, Edit, Eye, User, Image as ImageIcon, Users, Calendar, Phone, MapPin, Briefcase, Landmark, UserPlus, AlertTriangle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { PaginationControls } from "@/components/PaginationControls";
 
 interface Member {
   id: number;
@@ -43,6 +44,11 @@ export default function Members() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
 
   const [search, setSearch] = useState("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("all");
@@ -82,14 +88,14 @@ export default function Members() {
   const [confirmRemoveGroupId, setConfirmRemoveGroupId] = useState<number | null>(null);
   const [confirmRemoveGroupName, setConfirmRemoveGroupName] = useState<string>("");
   const API_BASE = import.meta.env.VITE_API_BASE_URL;
-  const fetchMembers = useCallback(async (groupId?: string) => {
+  const fetchMembers = useCallback(async (p = page, s = pageSize) => {
     if (!user) return;
     setLoading(true);
     setError("");
     try {
-      let url = `${API_BASE}/api/members`;
-      if (groupId && groupId !== "all") {
-        url = `${API_BASE}/api/members/group/${groupId}`;
+      let url = `${API_BASE}/api/members?page=${p}&size=${s}&search=${encodeURIComponent(search)}`;
+      if (selectedGroupId && selectedGroupId !== "all") {
+        url = `${API_BASE}/api/members/group/${selectedGroupId}?page=${p}&size=${s}&search=${encodeURIComponent(search)}`;
       }
 
       const res = await fetch(url, {
@@ -97,23 +103,30 @@ export default function Members() {
       });
       if (!res.ok) throw new Error("Failed to fetch members");
       const data = await res.json();
-      setMembers(data);
+      if (data.content !== undefined) {
+         setMembers(data.content);
+         setTotalPages(data.totalPages);
+         setTotalElements(data.totalElements);
+      } else {
+         setMembers(data);
+         setTotalElements(data.length);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [user, page, pageSize, search, selectedGroupId]);
 
   const fetchGroups = useCallback(async () => {
     if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/api/groups`, {
+      const res = await fetch(`${API_BASE}/api/groups?size=50`, {
         headers: { "loggedInUser": user.username },
       });
       if (res.ok) {
         const data = await res.json();
-        setGroups(data);
+        setGroups(data.content !== undefined ? data.content : data);
       }
     } catch (err) {
       console.error(err);
@@ -125,16 +138,19 @@ export default function Members() {
     fetchGroups();
   }, [fetchMembers, fetchGroups]);
 
+  // Debounced server-side search: reset to page 0 when search changes
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPage(0);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]); // eslint-disable-line
+
   const handleGroupFilter = (value: string) => {
     setSelectedGroupId(value);
-    fetchMembers(value);
+    setSearch("");
+    setPage(0);
   };
-
-  const filtered = members.filter(m => 
-    m.name.toLowerCase().includes(search.toLowerCase()) ||
-    m.aadhaarNumber.includes(search) ||
-    m.phone.includes(search)
-  );
 
   const handleCreateSubmit = async () => {
     if (!createForm.name || !createForm.phone || !createForm.aadhaarNumber) {
@@ -193,7 +209,7 @@ export default function Members() {
 
       setCreateOpen(false);
       resetCreateForm();
-      fetchMembers(selectedGroupId);
+      fetchMembers(0, pageSize);
       toast.success("Member created successfully");
     } catch (err: any) {
       toast.error(err.message);
@@ -242,7 +258,7 @@ export default function Members() {
       if (!res.ok) throw new Error(await res.text() || "Failed to update member");
       
       setEditOpen(false);
-      fetchMembers(selectedGroupId);
+      fetchMembers(page, pageSize);
     } catch (err: any) {
       toast.error(err.message);
     }
@@ -352,7 +368,12 @@ export default function Members() {
       <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search members..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9" />
+          <Input 
+            placeholder="Search members..." 
+            value={search} 
+            onChange={e => setSearch(e.target.value)} 
+            className="pl-9" 
+          />
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -391,10 +412,10 @@ export default function Members() {
           <tbody>
             {loading ? (
               <tr><td colSpan={7} className="text-center py-8 text-muted-foreground">Loading members...</td></tr>
-            ) : filtered.length === 0 ? (
+            ) : members.length === 0 ? (
               <tr><td colSpan={7} className="text-center py-8 text-muted-foreground">No members found.</td></tr>
             ) : (
-              filtered.map(m => (
+              members.map(m => (
                 <tr key={m.id}>
                   <td>{renderPhoto(m.photoPath)}</td>
                   <td className="font-medium">{m.name}</td>
@@ -441,6 +462,22 @@ export default function Members() {
           </tbody>
         </table>
       </div>
+
+      <PaginationControls
+        page={page}
+        pageSize={pageSize}
+        totalPages={totalPages}
+        totalElements={totalElements}
+        onPageChange={(p) => {
+           setPage(p);
+           fetchMembers(p, pageSize);
+        }}
+        onPageSizeChange={(s) => {
+           setPageSize(s);
+           setPage(0);
+           fetchMembers(0, s);
+        }}
+      />
 
       {/* CREATE MODAL */}
       <Dialog open={createOpen} onOpenChange={(val) => { 

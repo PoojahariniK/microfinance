@@ -13,7 +13,8 @@ public class LoanDraftDto {
     private Long groupId;
     private Double totalLoanAmount;
     private Double interestRate;
-    private Integer durationMonths;
+    private Double dueAmount;
+    private Integer durationWeeks;
     private LocalDate startDate;
     private LocalDate endDate;
     private List<LoanMemberDraftDto> members;

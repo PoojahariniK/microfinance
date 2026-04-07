@@ -27,7 +27,7 @@ public class Loan {
     private Double interestRate;
 
     @Column(nullable = false)
-    private Integer durationMonths;
+    private Integer durationWeeks;
 
     @Column(nullable = false)
     private LocalDate startDate;

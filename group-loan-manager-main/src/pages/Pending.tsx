@@ -1,10 +1,12 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Download, Printer, AlertCircle, PlayCircle, Loader2, Calendar, Users, Info, RotateCcw, Filter } from "lucide-react";
+import { Download, Printer, Calendar, Users, Info, RotateCcw, Filter, Search } from "lucide-react";
+import { PaginationControls } from "@/components/PaginationControls";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { PendingPaymentDto } from "@/types/loanTypes";
@@ -17,66 +19,116 @@ export default function Pending() {
   
   const [pendingList, setPendingList] = useState<PendingPaymentDto[]>([]);
   const [groups, setGroups] = useState<GroupData[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const API_BASE = import.meta.env.VITE_API_BASE_URL;
-  // Filters
-  const [selectedGroup, setSelectedGroup] = useState<string>("ALL");
+
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+
+  const [search, setSearch] = useState("");
+  const [selectedGroupId, setSelectedGroupId] = useState<string>("ALL");
   const [selectedTimeFilter, setSelectedTimeFilter] = useState<string>("ALL");
 
-  useEffect(() => {
-    fetchGroups();
-  }, []);
-
-  useEffect(() => {
-    fetchPendingList();
-  }, [selectedGroup, selectedTimeFilter]);
-
-  const fetchGroups = async () => {
+  const fetchGroups = useCallback(async () => {
+    if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/api/groups`, {
-        headers: { "loggedInUser": user?.username || "" }
-      });
-      if (res.ok) {
-        setGroups(await res.json());
-      }
-    } catch (e) {}
-  };
-
-  const fetchPendingList = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      if (selectedGroup !== "ALL") params.append("groupId", selectedGroup);
-      if (selectedTimeFilter !== "ALL") params.append("timeFilter", selectedTimeFilter);
-
-      const res = await fetch(`${API_BASE}/api/payments/pending?${params.toString()}`, {
-        headers: { "loggedInUser": user?.username || "" }
+      const res = await fetch(`${API_BASE}/api/groups?size=50`, {
+        headers: { "loggedInUser": user.username }
       });
       if (res.ok) {
         const data = await res.json();
-        setPendingList(data);
-      } else {
-        toast.error("Failed to load pending payments");
+        setGroups(data.content !== undefined ? data.content : data);
       }
-    } catch (error) {
+    } catch (e) {}
+  }, [user, API_BASE]);
+
+  const fetchPending = useCallback(async (p = page, s = pageSize) => {
+    if (!user) return;
+    setLoading(true);
+    setError("");
+    
+    try {
+      const gId = selectedGroupId !== "ALL" ? selectedGroupId : "";
+      const tFilter = selectedTimeFilter !== "ALL" ? selectedTimeFilter : "";
+      
+      const res = await fetch(`${API_BASE}/api/payments/pending?groupId=${gId}&timeFilter=${tFilter}&page=${p}&size=${s}&search=${encodeURIComponent(search)}`, {
+        headers: { "loggedInUser": user.username },
+      });
+      if (!res.ok) throw new Error("Failed to load pending payments");
+      
+      const data = await res.json();
+      setPendingList(data.content);
+      setTotalPages(data.totalPages);
+      setTotalElements(data.totalElements);
+    } catch (err: any) {
+      setError(err.message);
       toast.error("Error connecting to server");
     } finally {
       setLoading(false);
     }
+  }, [user, API_BASE, page, pageSize, search, selectedGroupId, selectedTimeFilter]);
+
+  useEffect(() => {
+    fetchGroups();
+  }, [fetchGroups]);
+
+  // Debounced search for Pending List
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPage(0);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
+    fetchPending();
+  }, [fetchPending]);
+
+  const handleGroupChange = (val: string) => {
+    setSelectedGroupId(val);
+    setPage(0);
+  };
+
+  const handleTimeChange = (val: string) => {
+    setSelectedTimeFilter(val);
+    setPage(0);
   };
 
   const handleReset = () => {
-    setSelectedGroup("ALL");
+    setSelectedGroupId("ALL");
     setSelectedTimeFilter("ALL");
+    setSearch("");
+    setPage(0);
   };
 
-  const handleExportCSV = () => {
-    if (pendingList.length === 0) {
+  const fetchAllForExport = async () => {
+    if (!user) return [];
+    try {
+      const gId = selectedGroupId !== "ALL" ? selectedGroupId : "";
+      const tFilter = selectedTimeFilter !== "ALL" ? selectedTimeFilter : "";
+      const res = await fetch(`${API_BASE}/api/payments/pending/export?groupId=${gId}&timeFilter=${tFilter}&search=${encodeURIComponent(search)}`, {
+        headers: { "loggedInUser": user.username }
+      });
+      if (!res.ok) throw new Error("Failed to fetch full list");
+      return await res.json();
+    } catch (e) {
+      toast.error("Error fetching full dataset");
+      return [];
+    }
+  };
+
+  const handleExportCSV = async () => {
+    toast.info("Preparing full CSV export...");
+    const fullData = await fetchAllForExport();
+    if (fullData.length === 0) {
       toast.error("No data available to export");
       return;
     }
     const headers = ["Group Name", "Loan ID", "Installment No", "Due Date", "Total Members", "Paid Members", "Pending Members", "Status"];
-    const rows = pendingList.map(item => [
+    const rows = fullData.map((item: any) => [
       item.groupName,
       item.loanId,
       item.installmentNo,
@@ -90,25 +142,28 @@ export default function Pending() {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", "pending_list.csv");
+    link.setAttribute("download", "pending_list_complete.csv");
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    toast.success("CSV export successful");
+    toast.success("Complete CSV export successful");
   };
 
-  const handlePrint = () => {
-    if (pendingList.length === 0) {
+  const handlePrint = async () => {
+    toast.info("Preparing print preview...");
+    const fullData = await fetchAllForExport();
+    if (fullData.length === 0) {
       toast.error("No data available to print");
       return;
     }
+    
     const printWindow = window.open('', '_blank');
     if (!printWindow) {
       toast.error("Please enable popups for printing");
       return;
     }
     
-    const tableRows = pendingList.map((item, idx) => `
+    const tableRows = fullData.map((item: any, idx: number) => `
       <tr>
         <td style="padding: 6px; text-align: center; border: 1px solid #000;">${idx + 1}</td>
         <td style="padding: 6px; border: 1px solid #000; font-weight: bold;">${item.groupName}</td>
@@ -124,7 +179,7 @@ export default function Pending() {
     printWindow.document.write(`
       <html>
         <head>
-          <title>Pending Collection List</title>
+          <title>Pending Collection List (Complete)</title>
           <style>
             @media print { .no-print { display: none; } }
             body { font-family: sans-serif; font-size: 11px; color: #000; background: #fff; margin: 0; padding: 20px; }
@@ -134,7 +189,7 @@ export default function Pending() {
           </style>
         </head>
         <body>
-          <h2>Pending Collection List</h2>
+          <h2>Pending Collection List (Filtered)</h2>
           <table>
             <thead>
               <tr>
@@ -167,10 +222,10 @@ export default function Pending() {
 
   return (
     <div className="space-y-6">
-      {/* HEADER SECTION */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex flex-col">
-<h2 className="text-xl font-bold tracking-tight flex items-center gap-2">            <Calendar className="h-5 w-5 text-primary" />
+          <h2 className="text-xl font-bold tracking-tight flex items-center gap-2">
+            <Calendar className="h-5 w-5 text-primary" />
             Pending List
           </h2>
           <p className="text-[10px] text-muted-foreground font-bold uppercase tracking-widest mt-1">
@@ -178,21 +233,33 @@ export default function Pending() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" className="gap-1 border-primary/20 hover:bg-primary/5 h-9 font-bold" onClick={handleExportCSV} disabled={pendingList.length === 0}>
+          <Button variant="outline" size="sm" className="gap-1 border-primary/20 hover:bg-primary/5 h-9 font-bold" onClick={handleExportCSV}>
             <Download className="h-3.5 w-3.5 text-primary" /> Export CSV
           </Button>
-          <Button variant="outline" size="sm" className="gap-1 border-primary/20 hover:bg-primary/5 h-9 font-bold" onClick={handlePrint} disabled={pendingList.length === 0}>
+          <Button variant="outline" size="sm" className="gap-1 border-primary/20 hover:bg-primary/5 h-9 font-bold" onClick={handlePrint}>
             <Printer className="h-3.5 w-3.5 text-primary" /> Print List
           </Button>
         </div>
       </div>
 
-      {/* FILTER UI */}
       <Card className="border-none shadow-sm bg-white border border-border/50">
         <CardContent className="p-4 flex flex-wrap gap-4 items-end">
           <div className="flex-1 min-w-[200px]">
+            <label className="text-[10px] font-black uppercase text-muted-foreground mb-1.5 block tracking-wider">Search</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+              <Input 
+                placeholder="Search by loan ID or group..." 
+                value={search} 
+                onChange={e => setSearch(e.target.value)} 
+                className="pl-9 h-10 bg-muted/20 border-none font-bold" 
+              />
+            </div>
+          </div>
+
+          <div className="flex-1 min-w-[200px]">
             <label className="text-[10px] font-black uppercase text-muted-foreground mb-1.5 block tracking-wider">Filter by Group</label>
-            <Select value={selectedGroup} onValueChange={setSelectedGroup}>
+            <Select value={selectedGroupId} onValueChange={handleGroupChange}>
               <SelectTrigger className="h-10 bg-muted/20 border-none font-bold">
                 <SelectValue placeholder="All Groups" />
               </SelectTrigger>
@@ -207,7 +274,7 @@ export default function Pending() {
 
           <div className="flex-1 min-w-[200px]">
             <label className="text-[10px] font-black uppercase text-muted-foreground mb-1.5 block tracking-wider">Time Horizon</label>
-            <Select value={selectedTimeFilter} onValueChange={setSelectedTimeFilter}>
+            <Select value={selectedTimeFilter} onValueChange={handleTimeChange}>
               <SelectTrigger className="h-10 bg-muted/20 border-none font-bold">
                 <SelectValue placeholder="All Time" />
               </SelectTrigger>
@@ -231,18 +298,15 @@ export default function Pending() {
         </CardContent>
       </Card>
 
-      {/* TABLE SECTION */}
       <div className="bg-white rounded-xl shadow-md border border-border/50 overflow-hidden">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-24 gap-4">
-            <Loader2 className="h-10 w-10 animate-spin text-primary opacity-20" />
-            <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest animate-pulse">Filtering Records...</p>
+            <p className="text-[10px] text-muted-foreground font-black uppercase tracking-widest animate-pulse">Loading Records...</p>
           </div>
         ) : pendingList.length === 0 ? (
           <div className="text-center py-24 text-muted-foreground space-y-3">
              <Filter className="h-16 w-16 mx-auto opacity-5" />
-             <p className="text-lg font-black uppercase text-foreground/40 tracking-tight">No pending collections for selected filters</p>
-             <p className="text-xs max-w-xs mx-auto font-medium">Try adjusting your filters or time horizon to expand the search results.</p>
+             <p className="text-lg font-black uppercase text-foreground/40 tracking-tight">No pending collections found</p>
           </div>
         ) : (
           <table className="w-full text-xs">
@@ -263,7 +327,7 @@ export default function Pending() {
                 <tr key={`${item.loanId}-${item.installmentNo}`} 
                     onClick={() => handleCollect(item)}
                     className={`transition-colors hover:bg-muted/10 cursor-pointer ${item.isOverdue ? 'bg-rose-50/40' : ''}`}>
-                  <td className="p-4 text-muted-foreground font-mono">{(idx + 1).toString().padStart(2, '0')}</td>
+                  <td className="p-4 text-muted-foreground font-mono">{(page * pageSize + idx + 1).toString().padStart(2, '0')}</td>
                   <td className="p-4 font-bold text-sm text-foreground uppercase tracking-tight">
                     {item.groupName}
                   </td>
@@ -314,6 +378,20 @@ export default function Pending() {
             Note: This is a read-only operational overview. Rows highlighted in light red have exceeded their due date and require immediate physical verification. Click "Collect" to launch the settlement gateway for a specific installment.
          </p>
       </div>
+
+      <PaginationControls
+        page={page}
+        pageSize={pageSize}
+        totalPages={totalPages}
+        totalElements={totalElements}
+        onPageChange={(p) => {
+           setPage(p);
+        }}
+        onPageSizeChange={(s) => {
+           setPageSize(s);
+           setPage(0);
+        }}
+      />
     </div>
   );
 }

@@ -12,6 +12,15 @@ export interface Member {
   group: string;
 }
 
+export function calcEndDate(start: string, collectionType: string, durationWeeks: number): string {
+  if (!start || !collectionType || durationWeeks <= 0) return "";
+  const date = new Date(start);
+  if (collectionType === "Daily") date.setDate(date.getDate() + durationWeeks * 7);
+  else if (collectionType === "Weekly") date.setDate(date.getDate() + durationWeeks * 7);
+  else if (collectionType === "Monthly") date.setMonth(date.getMonth() + durationWeeks / 4);
+  return date.toISOString().split("T")[0];
+}
+
 export interface Group {
   id: string;
   name: string;
@@ -38,7 +47,7 @@ export interface GroupLoan {
   groupName: string;
   loanAmount: number;
   interestRate: number;
-  duration: number;
+  durationWeeks: number;
   collectionType: "Daily" | "Weekly" | "Monthly";
   startDate: string;
   savingAmount: number;
@@ -148,21 +157,23 @@ export const store = {
 export function generateSchedule(
   loanAmount: number,
   interestRate: number,
-  durationMonths: number,
+  durationWeeks: number,
   collectionType: "Daily" | "Weekly" | "Monthly",
   startDate: string
 ): LoanScheduleItem[] {
   let numberOfDues: number;
   if (collectionType === "Daily") {
-    numberOfDues = durationMonths * 30;
+    numberOfDues = durationWeeks * 7;
   } else if (collectionType === "Weekly") {
-    numberOfDues = durationMonths * 4;
+    numberOfDues = durationWeeks;
+  } else if (collectionType === "Monthly") {
+    numberOfDues = durationWeeks / 4;
   } else {
-    numberOfDues = durationMonths;
+    numberOfDues = durationWeeks;
   }
 
   const principalPerDue = Math.round(loanAmount / numberOfDues);
-  const totalInterest = Math.round(loanAmount * (interestRate / 100) * durationMonths);
+  const totalInterest = Math.round(loanAmount * (interestRate / 100) * durationWeeks);
   const interestPerDue = Math.round(totalInterest / numberOfDues);
 
   const schedule: LoanScheduleItem[] = [];

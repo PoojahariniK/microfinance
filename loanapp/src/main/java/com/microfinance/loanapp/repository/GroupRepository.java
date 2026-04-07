@@ -10,4 +10,7 @@ public interface GroupRepository extends JpaRepository<Group, Long> {
     boolean existsByGroupName(String groupName);
 
     Optional<Group> findByGroupName(String groupName);
+
+    org.springframework.data.domain.Page<Group> findByGroupNameContainingIgnoreCase(
+        String groupName, org.springframework.data.domain.Pageable pageable);
 }

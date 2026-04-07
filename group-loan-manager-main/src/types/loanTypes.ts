@@ -15,7 +15,8 @@ export interface LoanDraftDto {
   groupId: number;
   totalLoanAmount: number;
   interestRate: number;
-  durationMonths: number;
+  dueAmount?: number;
+  durationWeeks: number;
   startDate: string;
   endDate: string;
   members: LoanMemberDraftDto[];
@@ -26,7 +27,8 @@ export interface LoanInitRequest {
   groupId: number;
   totalLoanAmount: number;
   interestRate: number;
-  durationMonths: number;
+  dueAmount?: number;
+  durationWeeks: number;
   startDate: string;
   endDate?: string;          // optional — system-computed; passed as a hint only
   memberIds: number[];
@@ -84,6 +86,7 @@ export interface EditLoanScheduleRequest {
 export interface AddMemberRequest {
   loanId: number;
   memberId: number;
+  dueAmount?: number;
 }
 
 export interface AddMemberScheduleDto {
@@ -99,12 +102,14 @@ export interface AddMemberPreviewResponse {
   memberId: number;
   memberName: string;
   principalAmount: number;
+  dueAmount?: number;
   schedules: AddMemberScheduleDto[];
 }
 
 export interface AddMemberConfirmRequest {
   memberId: number;
   principalAmount: number;
+  dueAmount?: number;
   schedules: AddMemberScheduleDto[];
 }
 
@@ -115,7 +120,7 @@ export interface LoanSummaryResponse {
   totalMembers: number;
   totalPrincipal: number;
   interestRate: number;
-  durationMonths: number;
+  durationWeeks: number;
   collectionType: string;
   status: string;
   charges?: LoanChargesDto;

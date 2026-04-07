@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Plus, Eye, Calendar, AlertTriangle, CheckCircle2, UserPlus, ArrowLeft, ArrowRight, Edit, Search } from "lucide-react";
+import { Plus, Eye, Calendar, AlertTriangle, CheckCircle2, UserPlus, ArrowLeft, ArrowRight, Edit, Search, RotateCcw } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { 
@@ -13,6 +13,7 @@ import {
   AddMemberScheduleDto, LoanSummaryResponse, EditMemberScheduleRequest,
   EditLoanRequest, LoanChargesDto, AddMemberPreviewResponse, AddMemberConfirmRequest
 } from "@/types/loanTypes";
+import { PaginationControls } from "@/components/PaginationControls";
 
 interface GroupData {
   id: number;
@@ -59,7 +60,14 @@ export default function Loans() {
   const [filterGroupId, setFilterGroupId] = useState<string>("");
   const [search, setSearch] = useState("");
 
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+
   // Create Form state
+  const [calculationBasis, setCalculationBasis] = useState<"FIXED_RATE" | "FIXED_DUE">("FIXED_RATE");
+  const [dueAmount, setDueAmount] = useState<string>("");
   const [selectedGroupId, setSelectedGroupId] = useState<string>("");
   const [loanAmount, setLoanAmount] = useState("");
   const [interestRate, setInterestRate] = useState("2");
@@ -85,6 +93,8 @@ export default function Loans() {
   const [addMemberStep, setAddMemberStep] = useState(1);
   const [addMemberDraft, setAddMemberDraft] = useState<AddMemberPreviewResponse | null>(null);
   const [addMemberSchedule, setAddMemberSchedule] = useState<AddMemberScheduleDto[]>([]);
+  const [initialAddMemberSchedule, setInitialAddMemberSchedule] = useState<AddMemberScheduleDto[]>([]);
+  const [addMemberAdminTarget, setAddMemberAdminTarget] = useState<number>(0);
   const [expectedAddMemberPrincipal, setExpectedAddMemberPrincipal] = useState(0);
   const [expectedAddMemberInterest, setExpectedAddMemberInterest] = useState(0);
 
@@ -108,34 +118,78 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     }
   }
 
-  // Mirrors backend calculateEndDate: walks the schedule to find the last installment due date
-  function calcEndDate(start: string, collectionType: string, durationMonths: number): string {
-    if (!start || !collectionType || durationMonths <= 0) return "";
-    const totalMap: Record<string, number> = {
-      DAILY: durationMonths * 30,
-      WEEKLY: durationMonths * 4,
-      BIWEEKLY: durationMonths * 2,
-      MONTHLY: durationMonths,
-    };
-    const total = totalMap[collectionType] ?? durationMonths;
+  /** Calculates end date based on duration in WEEKS and collection type. */
+  function calcEndDate(start: string, collectionType: string, durationWeeks: number): string {
+    if (!start || !collectionType || durationWeeks <= 0) return "";
+    
+    let totalSchedules = 0;
+    if (collectionType === "DAILY") totalSchedules = durationWeeks * 7;
+    else if (collectionType === "WEEKLY") totalSchedules = durationWeeks;
+    else if (collectionType === "BIWEEKLY") totalSchedules = Math.floor(durationWeeks / 2);
+    else if (collectionType === "MONTHLY") totalSchedules = Math.floor(durationWeeks / 4);
+    
+    if (totalSchedules <= 0) return "";
+    
     const d = new Date(start);
-    for (let i = 1; i < total; i++) {
-      if (collectionType === "DAILY")         d.setDate(d.getDate() + 1);
-      else if (collectionType === "WEEKLY")   d.setDate(d.getDate() + 7);
-      else if (collectionType === "BIWEEKLY") d.setDate(d.getDate() + 14);
-      else                                    d.setMonth(d.getMonth() + 1);
+    for (let i = 1; i < totalSchedules; i++) {
+        if (collectionType === "DAILY")         d.setDate(d.getDate() + 1);
+        else if (collectionType === "WEEKLY")   d.setDate(d.getDate() + 7);
+        else if (collectionType === "BIWEEKLY") d.setDate(d.getDate() + 14);
+        else                                    d.setMonth(d.getMonth() + 1);
     }
     return d.toISOString().split("T")[0];
   }
 
   const selectedGroup = groups.find(g => g.id.toString() === selectedGroupId);
   const durationNum = parseInt(duration) || 0;
+  
+  const scheduleCount = useMemo(() => {
+    if (!selectedGroup || durationNum <= 0) return 0;
+    const type = selectedGroup.collectionType;
+    if (type === "DAILY") return durationNum * 7;
+    if (type === "WEEKLY") return durationNum;
+    if (type === "BIWEEKLY") return Math.floor(durationNum / 2);
+    if (type === "MONTHLY") return Math.floor(durationNum / 4);
+    return 0;
+  }, [selectedGroup, durationNum]);
+
   const endDatePreview = useMemo(() =>
-    selectedGroup && startDate && durationNum > 0 && durationNum <= 200
+    selectedGroup && startDate && durationNum > 0 && durationNum <= 800
       ? calcEndDate(startDate, selectedGroup.collectionType, durationNum)
       : "",
     [selectedGroup, startDate, durationNum]
   );
+
+  // Auto-calculation logic for Calculation Basis
+  useEffect(() => {
+    if (calculationBasis === "FIXED_DUE") {
+      const p = parseFloat(loanAmount) || 0;
+      const d = parseFloat(dueAmount) || 0;
+      const dur = durationNum || 0;
+      const count = scheduleCount || 0;
+
+      if (p > 0 && d > 0 && dur > 0 && count > 0) {
+        const totalInterest = (d * count) - p;
+        const rate = (totalInterest / p) / dur * 100;
+        setInterestRate(rate.toFixed(2));
+      }
+    } else {
+      // FIXED_RATE mode: calculate dueAmount (informative)
+      const p = parseFloat(loanAmount) || 0;
+      const r = parseFloat(interestRate) || 0;
+      const dur = durationNum || 0;
+      const count = scheduleCount || 0;
+
+      if (p > 0 && dur > 0 && count > 0) {
+        const totalInterest = p * (r / 100) * dur;
+        const totalObligation = p + totalInterest;
+        const d = totalObligation / count;
+        setDueAmount(d.toFixed(2));
+      } else {
+        setDueAmount("");
+      }
+    }
+  }, [calculationBasis, loanAmount, interestRate, dueAmount, durationNum, scheduleCount]);
 
   const currentLoanSummary = useMemo(() =>
      loanSummaries.find(l => l.id === selectedLoanId),
@@ -146,32 +200,34 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const fetchGroups = useCallback(async () => {
     if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/api/groups`, {
+      const res = await fetch(`${API_BASE}/api/groups?size=50`, {
         headers: { "loggedInUser": user.username },
       });
       if (res.ok) {
         const data = await res.json();
-        setGroups(data);
+        setGroups(data.content !== undefined ? data.content : data);
       }
     } catch (err) {
       console.error("Failed to fetch groups", err);
     }
   }, [user]);
 
-  const fetchLoanSummaries = useCallback(async (groupId?: string) => {
+  const fetchLoanSummaries = useCallback(async (p = page, s = pageSize) => {
     if (!user) return;
     setFetchingLoans(true);
     try {
-      const url = groupId 
-        ? `${API_BASE}/api/loans/group/${groupId}/summary`
-        : `${API_BASE}/api/loans/summary`;
-        
+      let url = `${API_BASE}/api/loans/summary?page=${p}&size=${s}&search=${encodeURIComponent(search)}`;
+      if (filterGroupId && filterGroupId !== "ALL") {
+        url = `${API_BASE}/api/loans/group/${filterGroupId}/summary?page=${p}&size=${s}&search=${encodeURIComponent(search)}`;
+      }
       const res = await fetch(url, {
-        headers: { "loggedInUser": user.username },
+        headers: { "loggedInUser": user.username }
       });
       if (res.ok) {
         const data = await res.json();
-        setLoanSummaries(data);
+        setLoanSummaries(data.content);
+        setTotalPages(data.totalPages);
+        setTotalElements(data.totalElements);
       } else {
         setLoanSummaries([]);
       }
@@ -181,7 +237,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     } finally {
       setFetchingLoans(false);
     }
-  }, [user]);
+  }, [user, page, pageSize, filterGroupId, search]);
 
   const fetchLoans = useCallback(async (groupId: string, loanId: number | null) => {
     if (!user || !groupId || !loanId) return;
@@ -207,13 +263,14 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const fetchGroupMembers = useCallback(async (groupId: string) => {
     if (!user || !groupId) return;
     try {
-      const res = await fetch(`${API_BASE}/api/members/group/${groupId}`, {
+      const res = await fetch(`${API_BASE}/api/members/group/${groupId}?size=50`, {
         headers: { "loggedInUser": user.username },
       });
       if (res.ok) {
         const data = await res.json();
-        setGroupMembers(data);
-        setSelectedMemberIds(data.map((m: any) => m.id));
+        const content = data.content !== undefined ? data.content : data;
+        setGroupMembers(content);
+        setSelectedMemberIds(content.map((m: any) => m.id));
       }
     } catch (err) {
       console.error("Failed to fetch members", err);
@@ -222,18 +279,25 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
 
   useEffect(() => {
     fetchGroups();
-    fetchLoanSummaries();
-  }, [fetchGroups, fetchLoanSummaries]);
+  }, [fetchGroups]);
 
   useEffect(() => {
     if (filterGroupId && selectedLoanId) {
        fetchLoans(filterGroupId, selectedLoanId);
        setViewMode("SCHEDULE");
     } else {
-       fetchLoanSummaries(filterGroupId);
+       fetchLoanSummaries();
        setViewMode("SUMMARY");
     }
   }, [filterGroupId, selectedLoanId, fetchLoanSummaries, fetchLoans]);
+
+  // Debounced search for Loans: reset to page 0 when search changes
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPage(0);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   useEffect(() => {
     if (selectedGroupId && open) {
@@ -283,8 +347,9 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         body: JSON.stringify({
           groupId: parseInt(selectedGroupId),
           totalLoanAmount: parseFloat(loanAmount),
-          interestRate: parseFloat(interestRate),
-          durationMonths: parseInt(duration),
+          interestRate: calculationBasis === 'FIXED_RATE' ? parseFloat(interestRate) : undefined,
+          dueAmount: calculationBasis === 'FIXED_DUE' ? parseFloat(dueAmount) : undefined,
+          durationWeeks: parseInt(duration),
           startDate,
           endDate: endDatePreview || undefined,
           memberIds: selectedMemberIds,
@@ -383,10 +448,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       
       setStep(3);
       toast.success("Group loan created successfully!");
-      if (filterGroupId === selectedGroupId) {
-        fetchLoanSummaries(filterGroupId);
-        fetchLoans(filterGroupId, selectedLoanId);
-      }
+      fetchLoanSummaries(0, pageSize);
     } catch (err: any) {
       setError(err.message);
       toast.error(err.message);
@@ -427,8 +489,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       if (!res.ok) throw new Error(await res.text() || "Failed to preview member addition");
       
       const data = await res.json();
-      setAddMemberDraft(data); // Store the whole response including principalAmount and memberId
+      setAddMemberDraft(data);
       setAddMemberSchedule(data.schedules);
+      setInitialAddMemberSchedule(JSON.parse(JSON.stringify(data.schedules)));
+      setAddMemberAdminTarget(data.dueAmount || 0);
       setExpectedAddMemberPrincipal(data.schedules.reduce((sum: any, s: any) => sum + s.principal, 0));
       setExpectedAddMemberInterest(data.schedules.reduce((sum: any, s: any) => sum + s.interest, 0));
       setAddMemberStep(2);
@@ -442,14 +506,21 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
   const handleAddMemberConfirm = async () => {
     if (!addMemberDraft || !targetLoanId || !user) return;
     
-    const currentP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
-    const currentI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
+    const currentP = Number(addMemberSchedule.reduce((sum, s) => sum + s.principal, 0).toFixed(2));
+    const currentI = Number(addMemberSchedule.reduce((sum, s) => sum + s.interest, 0).toFixed(2));
+    const currentTotal = Number((currentP + currentI).toFixed(2));
+    const expectedTotal = Number((expectedAddMemberPrincipal + expectedAddMemberInterest).toFixed(2));
+
     if (Math.abs(currentP - expectedAddMemberPrincipal) > 0.1) {
-       toast.error(`Total principal must match ₹${expectedAddMemberPrincipal.toLocaleString()}. Currently off by ₹${Math.abs(expectedAddMemberPrincipal - currentP).toFixed(2)}`);
+       toast.error(`Principal Mismatch: Total must be ₹${expectedAddMemberPrincipal.toLocaleString()}. Currently: ₹${currentP.toLocaleString()}`);
        return;
     }
     if (Math.abs(currentI - expectedAddMemberInterest) > 0.1) {
-       toast.error(`Total interest must match ₹${expectedAddMemberInterest.toLocaleString()}. Currently off by ₹${Math.abs(expectedAddMemberInterest - currentI).toFixed(2)}`);
+       toast.error(`Interest Mismatch: Total must be ₹${expectedAddMemberInterest.toLocaleString()}. Currently: ₹${currentI.toLocaleString()}`);
+       return;
+    }
+    if (Math.abs(currentTotal - expectedTotal) > 0.1) {
+       toast.error(`Total Mismatch: Combined total must be ₹${expectedTotal.toLocaleString()}. Currently: ₹${currentTotal.toLocaleString()}`);
        return;
     }
 
@@ -589,7 +660,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       if (!res.ok) throw new Error(await res.text() || "Failed to update loan");
       toast.success("Loan updated successfully!");
       setEditLoanOpen(false);
-      fetchLoanSummaries(filterGroupId);
+      fetchLoanSummaries(page, pageSize);
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -622,6 +693,67 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setTargetLoanMemberIds([]);
   };
 
+  // Redistribution logic for Add Member
+  const handleAdminTargetChange = (newTarget: number) => {
+    setAddMemberAdminTarget(newTarget);
+    if (!addMemberSchedule.length) return;
+    
+    const rowCount = addMemberSchedule.length;
+    
+    // Total interest and principal for this member
+    const totalP = expectedAddMemberPrincipal;
+    const totalI = expectedAddMemberInterest;
+    const overallTotal = totalP + totalI;
+    
+    const updated = [...addMemberSchedule];
+    
+    // To follow the "equal spread" logic, we distribute the total as evenly as possible.
+    // If the user specified a target, we'll still use it as a base but adjust all rows equally to hit the total.
+    // Effectively, for an "equal spread", all rows should be (OverallTotal / count).
+    const targetValue = newTarget > 0 ? newTarget : (overallTotal / rowCount);
+    
+    const ratioP = totalP / (overallTotal || 1);
+    const pEach = Number((targetValue * ratioP).toFixed(2));
+    const iEach = Number((targetValue - pEach).toFixed(2));
+
+    let accP = 0;
+    let accI = 0;
+    
+    for (let i = 0; i < rowCount; i++) {
+        if (i === rowCount - 1) {
+            // Last row takes the remainder
+            const lastP = Number((totalP - accP).toFixed(2));
+            const lastI = Number((totalI - accI).toFixed(2));
+            updated[i] = { 
+                ...updated[i], 
+                principal: lastP, 
+                interest: lastI, 
+                total: Number((lastP + lastI).toFixed(2)) 
+            };
+        } else {
+            updated[i] = { 
+                ...updated[i], 
+                principal: pEach, 
+                interest: iEach, 
+                total: Number((pEach + iEach).toFixed(2)) 
+            };
+            accP = Number((accP + pEach).toFixed(2));
+            accI = Number((accI + iEach).toFixed(2));
+        }
+    }
+    
+    setAddMemberSchedule(updated);
+  };
+
+  const handleResetAddMemberSchedule = () => {
+    if (!addMemberDraft) return;
+    setAddMemberSchedule(addMemberDraft.schedules);
+    if (addMemberDraft.schedules.length > 0) {
+        setAddMemberAdminTarget(addMemberDraft.schedules[addMemberDraft.schedules.length - 1].total);
+    }
+    toast.info("Schedule reset to initial state");
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -646,129 +778,226 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                   <div className="space-y-4 py-4">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label className="text-xs">Select Group *</Label>
+                        <div className="flex justify-between items-center">
+                            <Label className="text-xs font-semibold">Select Group *</Label>
+                            {selectedGroup && (
+                               <div className="flex gap-2">
+                                  <span className="text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded font-bold uppercase tracking-tight">Type: {selectedGroup.collectionType}</span>
+                                  {selectedGroup.collectionType !== 'DAILY' && selectedGroup.collectionType !== 'MONTHLY' && (
+                                     <span className="text-[10px] bg-warning/10 text-warning-foreground px-1.5 py-0.5 rounded font-bold uppercase tracking-tight">Day: {groups.find(g => g.id === selectedGroup.id)?.groupName.split(' (')[1]?.replace(')', '') || 'MONDAY'}</span>
+                                  )}
+                               </div>
+                            )}
+                        </div>
                         <Select value={selectedGroupId} onValueChange={handleGroupSelect}>
-                          <SelectTrigger><SelectValue placeholder="Select group" /></SelectTrigger>
+                          <SelectTrigger className="h-11"><SelectValue placeholder="Select group to disburse" /></SelectTrigger>
                           <SelectContent>
                             {groups.map(g => <SelectItem key={g.id} value={g.id.toString()}>{g.groupName} ({g.collectionType})</SelectItem>)}
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="space-y-2">
-                        <Label className="text-xs">Loan Amount(Per Person) *</Label>
-                        <Input type="number" value={loanAmount} onChange={e => setLoanAmount(e.target.value)} placeholder="₹" />
+                        <Label className="text-xs font-semibold">Loan Amount(Per Person) *</Label>
+                        <div className="relative">
+                          <Input type="number" className="h-11 font-bold text-base pl-8" value={loanAmount} onChange={e => setLoanAmount(e.target.value)} placeholder="0.00" />
+                          <span className="absolute left-3 top-2.5 text-muted-foreground font-bold text-lg">₹</span>
+                        </div>
                       </div>
+
                       <div className="space-y-2">
-                        <Label className="text-xs">Interest Rate (% per month)</Label>
-                        <Input type="number" value={interestRate} onChange={e => setInterestRate(e.target.value)} />
+                        <Label className="text-xs font-semibold">Calculation Basis</Label>
+                        <Select value={calculationBasis} onValueChange={(v: any) => setCalculationBasis(v)}>
+                          <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="FIXED_DUE">Fixed Due Amount (₹)</SelectItem>
+                            <SelectItem value="FIXED_RATE">Fixed Interest Rate (%)</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
+
                       <div className="space-y-2">
-                        <Label className="text-xs">Start Date</Label>
-                        <Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+                        <Label className="text-xs font-semibold">Duration (Weeks: 1-800) *</Label>
+                        <div className="relative">
+                          <Input
+                            type="number"
+                            value={duration}
+                            onChange={e => setDuration(e.target.value)}
+                            min={1} max={800}
+                            className={`h-11 font-bold ${durationNum <= 0 || durationNum > 800 ? "border-destructive ring-1 ring-destructive" : ""}`}
+                          />
+                          {(durationNum <= 0 || durationNum > 800) && (
+                            <p className="absolute -bottom-5 left-0 text-[10px] text-destructive font-bold">Must be 1-800 weeks</p>
+                          )}
+                        </div>
                       </div>
+
                       <div className="space-y-2">
-                        <Label className="text-xs">Duration (months)</Label>
-                        <Input
-                          type="number"
-                          value={duration}
-                          onChange={e => setDuration(e.target.value)}
-                          min={1} max={200}
-                          className={durationNum <= 0 || durationNum > 200 ? "border-destructive" : ""}
-                        />
-                        {(durationNum <= 0 || durationNum > 200) && (
-                          <p className="text-[11px] text-destructive">Duration must be between 1 and 200 months</p>
-                        )}
+                        <Label className="text-xs font-semibold text-primary">Due Amount (per installment)</Label>
+                        <div className="relative">
+                          <Input 
+                            type="number" 
+                            className={`h-11 font-black transition-all ${calculationBasis === 'FIXED_RATE' ? 'bg-muted/30 cursor-not-allowed opacity-70' : 'bg-primary/5 focus:ring-2'}`}
+                            value={dueAmount} 
+                            disabled={calculationBasis === 'FIXED_RATE'}
+                            onChange={e => {
+                                const val = e.target.value;
+                                setDueAmount(val);
+                                // Auto-calc ghost rate if possible
+                                if (parseFloat(val) > 0 && parseFloat(loanAmount) > 0 && durationNum > 0 && scheduleCount > 0) {
+                                    const totalObligation = parseFloat(val) * scheduleCount;
+                                    const totalI = totalObligation - parseFloat(loanAmount);
+                                    const rate = (totalI / parseFloat(loanAmount)) / durationNum * 100;
+                                    setInterestRate(rate.toFixed(2));
+                                }
+                            }}
+                            placeholder={calculationBasis === 'FIXED_RATE' ? "AUTO" : "Enter amount"}
+                          />
+                          <span className="absolute left-3 top-2.5 text-muted-foreground/60 font-bold text-lg">₹</span>
+                        </div>
                       </div>
+
                       <div className="space-y-2">
-                        <Label className="text-xs">Calculated End Date</Label>
-                        <Input
-                          type="text"
-                          value={endDatePreview || "—"}
-                          readOnly
-                          className="bg-muted/60 cursor-not-allowed text-muted-foreground"
-                        />
-                        <p className="text-[11px] text-muted-foreground">Auto-computed by system from start date &amp; duration</p>
+                        <Label className="text-xs font-semibold">Interest Rate (% per week)</Label>
+                        <div className="relative">
+                          <Input 
+                            type="number" 
+                            className={`h-11 font-black transition-all ${calculationBasis === 'FIXED_DUE' ? 'bg-muted/30 cursor-not-allowed opacity-70' : 'bg-background'}`}
+                            value={interestRate} 
+                            readOnly={calculationBasis === 'FIXED_DUE'}
+                            onChange={e => setInterestRate(e.target.value)} 
+                          />
+                          <span className="absolute right-3 top-3 text-muted-foreground font-bold text-sm">%</span>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label className="text-xs font-semibold">Start Date</Label>
+                        <Input type="date" className="h-11 font-medium" value={startDate} onChange={e => setStartDate(e.target.value)} />
+                      </div>
+                      
+                      <div className="space-y-2 relative">
+                        <Label className="text-xs font-semibold text-muted-foreground">Calculated End Date</Label>
+                        <div className="relative">
+                           <Input
+                             type="text"
+                             value={endDatePreview || "—"}
+                             readOnly
+                             className="h-11 bg-muted/20 cursor-not-allowed text-muted-foreground font-medium"
+                           />
+                           {scheduleCount > 0 && (
+                             <span className="absolute right-3 top-3 text-[10px] font-bold bg-muted-foreground/20 px-2 py-0.5 rounded text-muted-foreground">
+                               {scheduleCount} installments
+                             </span>
+                           )}
+                        </div>
+                        <p className="text-[10px] text-muted-foreground/70 italic px-1">Auto-computed by system from start date & duration</p>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t">
-                      <div className="space-y-2">
-                        <Label className="text-xs">Saving Amount (per member)</Label>
-                        <Input type="number" min={0} value={savingAmount} onChange={e => setSavingAmount(e.target.value)} />
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-4 border-t bg-muted/10 p-3 rounded-lg border">
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-bold uppercase text-muted-foreground">Saving Amount</Label>
+                        <Input type="number" className="h-9 text-xs" min={0} value={savingAmount} onChange={e => setSavingAmount(e.target.value)} />
                       </div>
-                      <div className="space-y-2">
-                        <Label className="text-xs">Insurance Fee (per member)</Label>
-                        <Input type="number" min={0} value={insuranceFee} onChange={e => setInsuranceFee(e.target.value)} />
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-bold uppercase text-muted-foreground">Insurance Fee</Label>
+                        <Input type="number" className="h-9 text-xs" min={0} value={insuranceFee} onChange={e => setInsuranceFee(e.target.value)} />
                       </div>
-                      <div className="space-y-2">
-                        <Label className="text-xs">Processing Fee (per member)</Label>
-                        <Input type="number" min={0} value={processingFee} onChange={e => setProcessingFee(e.target.value)} />
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-bold uppercase text-muted-foreground">Processing Fee</Label>
+                        <Input type="number" className="h-9 text-xs" min={0} value={processingFee} onChange={e => setProcessingFee(e.target.value)} />
                       </div>
-                      <div className="space-y-2">
-                        <Label className="text-xs">Document Fee (per member)</Label>
-                        <Input type="number" min={0} value={documentFee} onChange={e => setDocumentFee(e.target.value)} />
+                      <div className="space-y-1">
+                        <Label className="text-[10px] font-bold uppercase text-muted-foreground">Document Fee</Label>
+                        <Input type="number" className="h-9 text-xs" min={0} value={documentFee} onChange={e => setDocumentFee(e.target.value)} />
                       </div>
                     </div>
 
                     {selectedGroupId && groupMembers.length > 0 && (
                       <div className="space-y-2 pt-4 border-t">
-                        <Label className="text-xs font-semibold">Select Members ({selectedMemberIds.length} / {groupMembers.length})</Label>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-32 overflow-y-auto p-2 border rounded-md">
+                        <Label className="text-xs font-bold uppercase text-muted-foreground px-1">Select Members ({selectedMemberIds.length} / {groupMembers.length})</Label>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-32 overflow-y-auto p-2 bg-background border rounded-lg shadow-inner">
                           {groupMembers.map(m => (
-                            <div key={m.id} className="flex items-center gap-2">
+                            <div key={m.id} className="flex items-center gap-2 p-1.5 rounded-md hover:bg-muted/50 cursor-pointer border border-transparent transition-colors">
                               <input 
                                 type="checkbox" 
                                 id={`m-${m.id}`} 
+                                className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
                                 checked={selectedMemberIds.includes(m.id)}
                                 onChange={(e) => {
                                   if (e.target.checked) setSelectedMemberIds([...selectedMemberIds, m.id]);
                                   else setSelectedMemberIds(selectedMemberIds.filter(id => id !== m.id));
                                 }}
                               />
-                              <label htmlFor={`m-${m.id}`} className="text-xs cursor-pointer">{m.name}</label>
+                              <label htmlFor={`m-${m.id}`} className="text-xs font-medium cursor-pointer select-none">{m.name}</label>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
 
-                    {error && <div className="p-3 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-md flex items-center gap-2"><AlertTriangle className="h-4 w-4" />{error}</div>}
+                    {error && <div className="p-4 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-3 font-semibold shadow-sm animate-in fade-in slide-in-from-top-1"><AlertTriangle className="h-5 w-5 shrink-0" />{error}</div>}
                     
-                    <Button onClick={handleInit} disabled={loading} className="w-full">
-                      {loading ? "Generating Draft..." : "Generate Schedule Preview"}
+                    <Button onClick={handleInit} disabled={loading} className="w-full h-12 text-base font-bold shadow-lg hover:shadow-xl transition-all">
+                      {loading ? "Generating Schedule..." : "Generate & Preview Schedule"}
                     </Button>
                   </div>
                 )}
 
                 {step === 2 && loanDraft && (
                   <div className="space-y-4 py-4">
-                    <div className="flex items-center justify-between bg-muted/50 p-2 rounded-md text-xs flex-wrap gap-2">
-                      <div className="flex gap-4">
-                        <div><strong>Amount:</strong> ₹{loanDraft.totalLoanAmount.toLocaleString()}</div>
-                        <div><strong>Interest:</strong> {loanDraft.interestRate}%</div>
-                        <div><strong>Duration:</strong> {loanDraft.durationMonths} mo</div>
-                      </div>
-                      <div className="flex gap-4">
-                        {(() => {
-                           const currentP = editableSchedule.reduce((sum, s) => sum + s.principal, 0);
-                           const currentI = editableSchedule.reduce((sum, s) => sum + s.interest, 0);
-                           const currentTotal = currentP + currentI;
-                           const expectedTotal = expectedInitPrincipal + expectedInitInterest;
+                    <div className="bg-primary/5 p-4 rounded-lg border border-primary/10 shadow-sm flex flex-col md:flex-row justify-around items-center gap-4">
+                       <div className="flex flex-col items-center">
+                          <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1 px-1 border-b">Duration</span>
+                          <div className="text-sm font-bold tracking-tight text-foreground">
+                            {loanDraft.durationWeeks} <span className="text-[10px] font-normal text-muted-foreground">weeks</span>
+                          </div>
+                       </div>
+                       <div className="h-8 w-px bg-border/50 hidden md:block" />
+                       <div className="flex flex-col items-center">
+                          <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1 px-1 border-b">Interest Rate</span>
+                          <div className="text-sm font-bold tracking-tight text-foreground">
+                            {loanDraft.interestRate}% <span className="text-[10px] font-normal text-muted-foreground">/wk</span>
+                          </div>
+                       </div>
+                       <div className="h-8 w-px bg-border/50 hidden md:block" />
+                       {(() => {
+                           const curP = editableSchedule.reduce((sum, s) => sum + s.principal, 0);
+                           const curI = editableSchedule.reduce((sum, s) => sum + s.interest, 0);
+                           const curT = curP + curI;
+                           const expP = expectedInitPrincipal;
+                           const expI = expectedInitInterest;
+                           const expT = expP + expI;
+
+                           const isPErr = Math.abs(curP - expP) > 0.5;
+                           const isIErr = Math.abs(curI - expI) > 0.5;
+                           const isTErr = Math.abs(curT - expT) > 0.5;
+
                            return (
-                              <>
-                                <span className={`font-bold ${Math.abs(currentP - expectedInitPrincipal) > 0.1 ? 'text-destructive' : ''}`}>
-                                  Principal: ₹{currentP.toLocaleString()} / ₹{expectedInitPrincipal.toLocaleString()}
-                                </span>
-                                <span className={`font-bold ${Math.abs(currentI - expectedInitInterest) > 0.1 ? 'text-destructive' : ''}`}>
-                                  Interest: ₹{currentI.toLocaleString()} / ₹{expectedInitInterest.toLocaleString()}
-                                </span>
-                                <span className={`font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
-                                  Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
-                                </span>
-                              </>
+                             <>
+                                <div className="flex flex-col items-center">
+                                  <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1 px-1 border-b">Principal</span>
+                                  <div className={`text-sm font-bold tracking-tight ${isPErr ? 'text-destructive animate-pulse' : 'text-foreground'}`}>
+                                    ₹{curP.toLocaleString()} <span className="text-muted-foreground/30 font-normal mx-0.5">/</span> ₹{expP.toLocaleString()}
+                                  </div>
+                                </div>
+                                <div className="h-8 w-px bg-border/50 hidden md:block" />
+                                <div className="flex flex-col items-center">
+                                  <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1 px-1 border-b">Interest</span>
+                                  <div className={`text-sm font-bold tracking-tight ${isIErr ? 'text-destructive animate-pulse' : 'text-foreground'}`}>
+                                    ₹{curI.toLocaleString()} <span className="text-muted-foreground/30 font-normal mx-0.5">/</span> ₹{expI.toLocaleString()}
+                                  </div>
+                                </div>
+                                <div className="h-8 w-px bg-border/50 hidden md:block" />
+                                <div className="flex flex-col items-center">
+                                  <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1 px-1 border-b">Total Due</span>
+                                  <div className={`text-sm font-black tracking-tight ${isTErr ? 'text-destructive animate-pulse' : 'text-primary'}`}>
+                                    ₹{curT.toLocaleString()} <span className="text-muted-foreground/30 font-normal mx-0.5">/</span> ₹{expT.toLocaleString()}
+                                  </div>
+                                </div>
+                             </>
                            );
-                        })()}
-                      </div>
+                       })()}
                     </div>
 
                     <div className="max-h-[55vh] overflow-y-auto space-y-4 pr-1">
@@ -871,10 +1100,10 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                        })}
                     </div>
 
-                    <div className="flex gap-3">
-                      <Button variant="outline" onClick={() => setStep(1)} className="flex-1">Back</Button>
-                      <Button onClick={handleConfirm} disabled={loading} className="flex-1">
-                        {loading ? "Creating..." : "Confirm & Create Loan"}
+                    <div className="flex gap-3 pt-4 border-t mt-4">
+                      <Button variant="outline" onClick={() => setStep(1)} className="flex-1 h-11">Back to Initialization</Button>
+                      <Button onClick={handleConfirm} disabled={loading} className="flex-[2] h-11 text-base font-bold shadow-lg bg-primary">
+                        {loading ? "Creating Loan..." : "Confirm & Create Group Loan"}
                       </Button>
                     </div>
                   </div>
@@ -998,17 +1227,17 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
               <tbody>
                 {fetchingLoans ? (
                   <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">Loading summaries...</td></tr>
-                ) : loanSummaries.filter(ls => ls.groupName?.toLowerCase().includes(search.toLowerCase()) || ls.id.toString().includes(search)).length === 0 ? (
+                ) : loanSummaries.length === 0 ? (
                   <tr><td colSpan={9} className="text-center py-8 text-muted-foreground">No loans found.</td></tr>
                 ) : (
-                  loanSummaries.filter(ls => ls.groupName?.toLowerCase().includes(search.toLowerCase()) || ls.id.toString().includes(search)).map((ls) => (
+                  loanSummaries.map((ls) => (
                     <tr key={ls.id}>
                       <td className="font-bold text-primary"># {ls.id}</td>
                       <td>{ls.groupName}</td>
                       <td className="text-center font-medium">{ls.totalMembers}</td>
                       <td className="font-semibold">₹{ls.totalPrincipal.toLocaleString()}</td>
                       <td>{ls.interestRate}%</td>
-                      <td>{ls.durationMonths} mo</td>
+                      <td>{ls.durationWeeks} weeks</td>
                       <td><span className="px-2 py-0.5 rounded-full bg-secondary text-secondary-foreground text-[10px]">{ls.collectionType}</span></td>
                       <td>
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${ls.status === 'ACTIVE' ? 'bg-success/10 text-success' : 'bg-muted text-muted-foreground'}`}>
@@ -1078,6 +1307,21 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 )}
               </tbody>
             </table>
+            <PaginationControls
+              page={page}
+              pageSize={pageSize}
+              totalPages={totalPages}
+              totalElements={totalElements}
+              onPageChange={(p) => {
+                setPage(p);
+                fetchLoanSummaries(p, pageSize);
+              }}
+              onPageSizeChange={(s) => {
+                setPageSize(s);
+                setPage(0);
+                fetchLoanSummaries(0, s);
+              }}
+            />
           </>
         ) : (
           <>
@@ -1313,7 +1557,6 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
              </table>
           </div>
           <div className="flex justify-end gap-2 pt-4 border-t mt-4">
-             <Button variant="outline" size="sm" onClick={() => setEditMemberOpen(false)}>Cancel</Button>
              <Button size="sm" onClick={handleEditMemberSchedule} disabled={loading}>
                {loading ? "Saving..." : "Save Member Schedule"}
              </Button>
@@ -1322,24 +1565,26 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       </Dialog>
 
       <Dialog open={addMemberOpen} onOpenChange={(v) => { if (!v) resetForm(); setAddMemberOpen(v); }}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-hidden flex flex-col p-6">
           <DialogHeader>
-            <DialogTitle>
-              {addMemberStep === 1 && "Add Member to Loan - Select Member"}
-              {addMemberStep === 2 && "Add Member to Loan - Review Schedule"}
-              {addMemberStep === 3 && "Success"}
+            <DialogTitle className="flex items-center gap-2">
+              <UserPlus className="h-5 w-5" />
+              {addMemberStep === 1 && "Add Member to Loan - Step 1: Select Member"}
+              {addMemberStep === 2 && "Add Member to Loan - Step 2: Review & Catch up Schedule"}
+              {addMemberStep === 3 && "Add Member to Loan - Success"}
             </DialogTitle>
           </DialogHeader>
 
           {addMemberStep === 1 && (
             <div className="space-y-4 py-4">
-              <div className="p-3 bg-muted/50 rounded-md text-xs">
-                Adding a new member to Loan # {targetLoanId}. The backend will generate a matching schedule.
+              <div className="p-3 bg-muted/50 rounded-md text-xs border">
+                Consolidating missed installments into the first payment of the new member's schedule. 
+                Subsequent installments will follow the standard amount.
               </div>
               <div className="space-y-2">
-                <Label>Select Member</Label>
+                <Label className="text-[11px] font-bold uppercase text-muted-foreground mr-1">Select Member from Group</Label>
                 <Select value={targetMemberId} onValueChange={setTargetMemberId}>
-                  <SelectTrigger><SelectValue placeholder="Choose a member" /></SelectTrigger>
+                  <SelectTrigger className="h-10"><SelectValue placeholder="Choose a member to add" /></SelectTrigger>
                   <SelectContent>
                     {(() => {
                         const available = groupMembers.filter(m => !targetLoanMemberIds.includes(m.id));
@@ -1350,124 +1595,174 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                 </Select>
               </div>
               <Button 
-                className="w-full" 
+                className="w-full h-11" 
                 onClick={handleAddMemberPreview} 
                 disabled={loading || !targetMemberId}
               >
-                {loading ? "Generating Schedule..." : "Preview Schedule"}
+                {loading ? "Calculating Schedule..." : "Generate Schedule Preview"}
               </Button>
             </div>
           )}
 
           {addMemberStep === 2 && addMemberDraft && (
-            <div className="space-y-4 py-4">
-              <div className="p-3 bg-primary/5 rounded-md text-xs border border-primary/10 flex justify-between items-center flex-wrap gap-2">
-                 <span>Previewing schedule for member: <strong>{groupMembers.find(m => m.id === Number(targetMemberId))?.name}</strong></span>
-                 <div className="flex gap-4">
+            <div className="flex-1 overflow-hidden flex flex-col space-y-4 mt-2">
+                {/* Proposed Dynamic Summary Bar */}
+                <div className="bg-primary/5 p-4 rounded-lg border border-primary/10 shadow-sm flex flex-col md:flex-row justify-around items-center gap-4">
                   {(() => {
-                     const currentP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
-                     const currentI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
-                     const currentTotal = currentP + currentI;
-                     const expectedTotal = expectedAddMemberPrincipal + expectedAddMemberInterest;
-                     return (
-                        <>
-                          <span className={`text-xs font-bold ${Math.abs(currentP - expectedAddMemberPrincipal) > 0.1 ? 'text-destructive' : ''}`}>
-                            Principal: ₹{currentP.toLocaleString()} / ₹{expectedAddMemberPrincipal.toLocaleString()}
-                          </span>
-                          <span className={`text-xs font-bold ${Math.abs(currentI - expectedAddMemberInterest) > 0.1 ? 'text-destructive' : ''}`}>
-                            Interest: ₹{currentI.toLocaleString()} / ₹{expectedAddMemberInterest.toLocaleString()}
-                          </span>
-                          <span className={`text-xs font-bold ${Math.abs(currentTotal - expectedTotal) > 0.1 ? 'text-destructive' : ''}`}>
-                            Total: ₹{currentTotal.toLocaleString()} / ₹{expectedTotal.toLocaleString()}
-                          </span>
-                        </>
-                     );
-                  })()}
-                 </div>
-              </div>
-              
-              <div className="max-h-60 overflow-y-auto border rounded-md">
-                <table className="data-table text-xs">
-                  <thead className="sticky top-0 bg-background">
-                    <tr>
-                      <th>Inst #</th>
-                      <th>Due Date</th>
-                      <th>Principal</th>
-                      <th>Interest</th>
-                      <th>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {addMemberSchedule.map((item, i) => (
-                      <tr key={i}>
-                        <td className="text-center font-bold">{item.installmentNo}</td>
-                        <td>
-                          <Input 
-                             type="date" 
-                             value={item.dueDate || ""} 
-                             onChange={e => {
-                               const updated = [...addMemberSchedule];
-                               updated[i] = { ...item, dueDate: e.target.value };
-                               setAddMemberSchedule(updated);
-                             }}
-                             className="h-7 text-[11px] w-[140px] px-1"
-                          />
-                        </td>
-                        <td>
-                          <Input 
-                            type="number" 
-                            value={item.principal} 
-                            onChange={e => {
-                              const val = Number(e.target.value);
-                              const updated = [...addMemberSchedule];
-                              updated[i] = { ...item, principal: val, total: val + item.interest };
-                              setAddMemberSchedule(updated);
-                            }}
-                            className="h-7 w-20 text-[11px]"
-                          />
-                        </td>
-                        <td>
-                          <Input 
-                            type="number" 
-                            value={item.interest} 
-                            onChange={e => {
-                              const val = Number(e.target.value);
-                              const updated = [...addMemberSchedule];
-                              updated[i] = { ...item, interest: val, total: Number((val + item.principal).toFixed(2)) };
-                              setAddMemberSchedule(updated);
-                            }}
-                            className="h-7 w-20 text-[11px] px-1"
-                          />
-                        </td>
-                        <td className="font-bold">₹{(item.principal + item.interest).toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                      const curP = addMemberSchedule.reduce((sum, s) => sum + s.principal, 0);
+                      const curI = addMemberSchedule.reduce((sum, s) => sum + s.interest, 0);
+                      const curT = curP + curI;
+                      const expP = expectedAddMemberPrincipal;
+                      const expI = expectedAddMemberInterest;
+                      const expT = expP + expI;
 
-              <div className="flex gap-3">
-                <Button variant="outline" onClick={() => setAddMemberStep(1)} className="flex-1">Back</Button>
-                <Button onClick={handleAddMemberConfirm} disabled={loading} className="flex-1">
-                  {loading ? "Adding Member..." : "Confirm & Add Member"}
-                </Button>
-              </div>
+                      const isPErr = Math.abs(curP - expP) > 0.5;
+                      const isIErr = Math.abs(curI - expI) > 0.5;
+                      const isTErr = Math.abs(curT - expT) > 0.5;
+
+                      return (
+                        <>
+                          <div className="flex flex-col items-center">
+                            <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1">Principal Amount</span>
+                            <div className={`text-sm font-bold tracking-tight ${isPErr ? 'text-destructive animate-pulse' : 'text-foreground'}`}>
+                              ₹{curP.toLocaleString()} <span className="text-muted-foreground/50 font-normal mx-1">/</span> ₹{expP.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="h-8 w-px bg-border/50 hidden md:block" />
+                          <div className="flex flex-col items-center">
+                            <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1">Interest Amount</span>
+                            <div className={`text-sm font-bold tracking-tight ${isIErr ? 'text-destructive animate-pulse' : 'text-foreground'}`}>
+                              ₹{curI.toLocaleString()} <span className="text-muted-foreground/50 font-normal mx-1">/</span> ₹{expI.toLocaleString()}
+                            </div>
+                          </div>
+                          <div className="h-8 w-px bg-border/50 hidden md:block" />
+                          <div className="flex flex-col items-center">
+                            <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-wider mb-1">Total Due Amount</span>
+                            <div className={`text-sm font-black tracking-tight ${isTErr ? 'text-destructive animate-pulse' : 'text-primary'}`}>
+                              ₹{curT.toLocaleString()} <span className="text-muted-foreground/50 font-normal mx-1">/</span> ₹{expT.toLocaleString()}
+                            </div>
+                          </div>
+                        </>
+                      );
+                  })()}
+                </div>
+
+                <div className="flex items-center gap-4 bg-muted/30 p-2 rounded-md border border-dashed justify-between">
+                    <div className="flex items-center gap-2">
+                        <Label className="text-[10px] font-bold uppercase text-muted-foreground whitespace-nowrap pl-1">Standard Per Due Target:</Label>
+                        <div className="relative">
+                          <Input 
+                            type="number" 
+                            className="h-8 w-24 text-xs font-bold pl-5 border-none bg-background focus-visible:ring-1" 
+                            value={addMemberAdminTarget}
+                            onChange={(e) => handleAdminTargetChange(Number(e.target.value))}
+                          />
+                          <span className="absolute left-1.5 top-2 text-muted-foreground font-bold text-[10px]">₹</span>
+                        </div>
+                        <p className="text-[10px] italic text-muted-foreground">Updating this redistributes the total across all rows</p>
+                    </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto pr-1 border rounded-md">
+                    <table className="data-table text-[11px] w-full mt-0">
+                        <thead className="bg-muted/50 sticky top-0 shadow-sm z-10">
+                          <tr>
+                            <th className="w-12 text-center">#</th>
+                            <th className="text-left w-32">Due Date</th>
+                            <th className="text-left w-24">Standard Per Due</th>
+                            <th className="text-left">Principal</th>
+                            <th className="text-left">Interest</th>
+                            <th className="text-left bg-primary/5">Row Total</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                              {addMemberSchedule.map((item, idx) => (
+                                <tr key={item.installmentNo} className={idx === 0 ? "bg-primary/5 border-l-4 border-primary" : ""}>
+                                  <td className="text-center font-bold text-primary">
+                                    {item.installmentNo}
+                                    {idx === 0 && <span className="block text-[8px] uppercase text-primary/70">Catch up</span>}
+                                  </td>
+                                  <td>
+                                    <Input
+                                      type="date"
+                                      value={item.dueDate}
+                                      onChange={e => {
+                                        const updated = [...addMemberSchedule];
+                                        updated[idx] = { ...item, dueDate: e.target.value };
+                                        setAddMemberSchedule(updated);
+                                      }}
+                                      className="h-7 w-[130px] text-[11px] px-1 border-none focus-visible:ring-1"
+                                    />
+                                  </td>
+                                  <td className="font-semibold text-muted-foreground pl-1">
+                                    ₹{addMemberAdminTarget.toLocaleString()}
+                                  </td>
+                                  <td>
+                                    <Input
+                                      type="number"
+                                      value={item.principal}
+                                      onChange={e => {
+                                        const val = Number(e.target.value);
+                                        const updated = [...addMemberSchedule];
+                                        updated[idx] = { ...item, principal: val, total: Number((val + item.interest).toFixed(2)) };
+                                        setAddMemberSchedule(updated);
+                                      }}
+                                      className="h-7 w-20 text-[11px] border-none focus-visible:ring-1"
+                                    />
+                                  </td>
+                                  <td>
+                                    <Input
+                                      type="number"
+                                      value={item.interest}
+                                      onChange={e => {
+                                        const val = Number(e.target.value);
+                                        const updated = [...addMemberSchedule];
+                                        updated[idx] = { ...item, interest: val, total: Number((val + item.principal).toFixed(2)) };
+                                        setAddMemberSchedule(updated);
+                                      }}
+                                      className="h-7 w-20 text-[11px] border-none focus-visible:ring-1"
+                                    />
+                                  </td>
+                                  <td className="bg-primary/5 font-bold">
+                                    <div className="flex items-center gap-1">
+                                       ₹{item.total.toLocaleString()}
+                                       {idx > 0 && Math.abs(item.total - addMemberAdminTarget) > 1 && (
+                                         <AlertTriangle className="h-3 w-3 text-orange-500" />
+                                       )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div className="flex gap-3 pt-4 border-t">
+                      <Button variant="outline" onClick={() => setAddMemberStep(1)} className="flex-1">Back</Button>
+                      <Button variant="secondary" onClick={handleResetAddMemberSchedule} className="flex-1 gap-2">
+                        <RotateCcw className="h-4 w-4" /> Reset Schedule
+                      </Button>
+                      <Button onClick={handleAddMemberConfirm} disabled={loading} className="flex-2 h-10 bg-primary">
+                        {loading ? "Adding Member..." : "Confirm & Persist Schedule"}
+                      </Button>
+                    </div>
             </div>
           )}
 
           {addMemberStep === 3 && (
             <div className="py-12 flex flex-col items-center justify-center space-y-4 text-center">
-              <div className="h-16 w-16 bg-success/20 rounded-full flex items-center justify-center text-success">
-                <CheckCircle2 className="h-10 w-10" />
+              <div className="h-20 w-20 bg-success/20 rounded-full flex items-center justify-center text-success mb-2">
+                <CheckCircle2 className="h-12 w-12" />
               </div>
-              <h3 className="text-xl font-bold">Member Added Successfully!</h3>
-              <Button onClick={() => { setAddMemberOpen(false); window.location.reload(); }} className="px-8">Close</Button>
+              <h3 className="text-2xl font-bold">Member Linked!</h3>
+              <p className="text-muted-foreground text-sm max-w-sm">
+                The member has been added to the loan and their personalized schedule has been persisted.
+              </p>
+              <Button onClick={() => { setAddMemberOpen(false); window.location.reload(); }} className="px-10 h-11 mt-4">Close & Refresh</Button>
             </div>
           )}
         </DialogContent>
       </Dialog>
-
-
     </div>
   );
 }

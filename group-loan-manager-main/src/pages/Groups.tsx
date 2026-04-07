@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Plus, Edit, Users, Search } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { PaginationControls } from "@/components/PaginationControls";
 
 interface Group {
   id: number;
@@ -40,6 +41,11 @@ export default function Groups() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(25);
+  const [totalPages, setTotalPages] = useState(0);
+  const [totalElements, setTotalElements] = useState(0);
+
   const [staffUsers, setStaffUsers] = useState<StaffUser[]>([]);
   const [staffId, setStaffId] = useState<number | null>(null);
 
@@ -66,12 +72,12 @@ export default function Groups() {
   const [editOpen, setEditOpen] = useState(false);
   const [editForm, setEditForm] = useState<any>(null);
   const API_BASE = import.meta.env.VITE_API_BASE_URL;
-  const fetchGroups = useCallback(async () => {
+  const fetchGroups = useCallback(async (p = page, s = pageSize, q = search) => {
     if (!user) return;
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/api/groups`, {
+      const res = await fetch(`${API_BASE}/api/groups?page=${p}&size=${s}&search=${encodeURIComponent(q)}`, {
         headers: {
           "Content-Type": "application/json",
           "loggedInUser": user.username,
@@ -79,13 +85,20 @@ export default function Groups() {
       });
       if (!res.ok) throw new Error("Failed to fetch groups");
       const data = await res.json();
-      setGroups(data);
+      if (data.content !== undefined) {
+         setGroups(data.content);
+         setTotalPages(data.totalPages);
+         setTotalElements(data.totalElements);
+      } else {
+         setGroups(data);
+         setTotalElements(data.length);
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [user]);
+  }, [user, page, pageSize, search]);
 
   const fetchStaffData = useCallback(async () => {
     if (!user) return;
@@ -118,6 +131,15 @@ export default function Groups() {
     fetchGroups();
     fetchStaffData();
   }, [fetchGroups, fetchStaffData]);
+
+  // Debounced server-side search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setPage(0);
+      fetchGroups(0, pageSize, search);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [search]); // eslint-disable-line
 
   const handleViewMembers = async (group: Group) => {
     setSelectedGroupName(group.groupName);
@@ -240,7 +262,12 @@ export default function Groups() {
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-muted/30 p-3 rounded-lg border">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search groups..." value={search} onChange={e => setSearch(e.target.value)} className="pl-9 bg-background" />
+          <Input 
+            placeholder="Search groups..." 
+            value={search} 
+            onChange={e => setSearch(e.target.value)} 
+            className="pl-9 bg-background" 
+          />
         </div>
 
         {isAdmin && (
@@ -272,10 +299,10 @@ export default function Groups() {
           <tbody>
             {loading ? (
               <tr><td colSpan={7} className="text-center py-4 text-muted-foreground">Loading groups...</td></tr>
-            ) : groups.filter(g => g.groupName?.toLowerCase().includes(search.toLowerCase()) || g.id.toString().includes(search)).length === 0 ? (
+            ) : groups.length === 0 ? (
               <tr><td colSpan={7} className="text-center py-4 text-muted-foreground">No groups found.</td></tr>
             ) : (
-              groups.filter(g => g.groupName?.toLowerCase().includes(search.toLowerCase()) || g.id.toString().includes(search)).map(g => (
+              groups.map(g => (
                 <tr key={g.id}>
                   <td className="font-medium">{g.id}</td>
                   <td>{g.groupName || "-"}</td>
@@ -305,6 +332,22 @@ export default function Groups() {
           </tbody>
         </table>
       </div>
+
+      <PaginationControls
+        page={page}
+        pageSize={pageSize}
+        totalPages={totalPages}
+        totalElements={totalElements}
+        onPageChange={(p) => {
+           setPage(p);
+           fetchGroups(p, pageSize);
+        }}
+        onPageSizeChange={(s) => {
+           setPageSize(s);
+           setPage(0);
+           fetchGroups(0, s);
+        }}
+      />
 
       {/* CREATE MODAL */}
       <Dialog open={createOpen} onOpenChange={(val) => {

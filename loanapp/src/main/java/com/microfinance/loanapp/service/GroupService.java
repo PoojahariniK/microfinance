@@ -74,13 +74,29 @@ public class GroupService {
     }
 
     // GET ALL GROUPS
-    public List<GroupResponse> getAllGroups(String loggedInUser) {
+    public PaginatedResponse<GroupResponse> getAllGroups(int page, int size, String search, String loggedInUser) {
 
         validateAndGetUser(loggedInUser);
-
-        return groupRepository.findAll().stream()
+        
+        org.springframework.data.domain.Pageable pageable = org.springframework.data.domain.PageRequest.of(page, size);
+        org.springframework.data.domain.Page<Group> groupPage;
+        
+        if (search != null && !search.isBlank()) {
+            groupPage = groupRepository.findByGroupNameContainingIgnoreCase(search.trim(), pageable);
+        } else {
+            groupPage = groupRepository.findAll(pageable);
+        }
+        
+        List<GroupResponse> content = groupPage.getContent().stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
+                
+        return new PaginatedResponse<>(
+                content,
+                groupPage.getTotalPages(),
+                groupPage.getTotalElements(),
+                groupPage.getNumber()
+        );
     }
 
     // GET GROUP MEMBERS

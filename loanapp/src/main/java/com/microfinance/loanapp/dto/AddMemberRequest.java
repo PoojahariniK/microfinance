@@ -5,4 +5,5 @@ import lombok.Data;
 @Data
 public class AddMemberRequest {
     private Long memberId;
+    private Double dueAmount;
 }

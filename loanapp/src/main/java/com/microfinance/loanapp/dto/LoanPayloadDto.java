@@ -10,7 +10,7 @@ public class LoanPayloadDto {
 
     private Long groupId;
     private Double interestRate;
-    private Integer durationMonths;
+    private Integer durationWeeks;
     private LocalDate startDate;
     private LocalDate endDate;
 }

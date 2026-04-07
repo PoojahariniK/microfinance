@@ -28,11 +28,17 @@ public class GroupController {
 
     // GET ALL
     @GetMapping
-    public ResponseEntity<List<GroupResponse>> getAllGroups(
+    public ResponseEntity<PaginatedResponse<GroupResponse>> getAllGroups(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search,
             @RequestHeader("loggedInUser") String loggedInUser) {
-
+        
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
         return ResponseEntity.ok(
-                groupService.getAllGroups(loggedInUser)
+                groupService.getAllGroups(page, size, search, loggedInUser)
         );
     }
 

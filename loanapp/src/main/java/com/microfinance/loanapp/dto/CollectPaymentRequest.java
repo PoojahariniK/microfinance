@@ -11,4 +11,5 @@ public class CollectPaymentRequest {
     private Integer installmentNo;
     private LocalDate paymentDate;
     private List<PaymentEntryDto> payments;
+    private Boolean bypassPreviousCheck;
 }

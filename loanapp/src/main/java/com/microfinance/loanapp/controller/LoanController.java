@@ -58,15 +58,27 @@ public class LoanController {
     }
 
     @GetMapping("/summary")
-    public ResponseEntity<List<LoanSummaryResponse>> getGlobalSummary() {
-        return ResponseEntity.ok(loanCreationService.getLoanSummaryByGroup(null, null));
+    public ResponseEntity<PaginatedResponse<LoanSummaryResponse>> getGlobalSummary(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search) {
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
+        return ResponseEntity.ok(loanCreationService.getLoanSummaryByGroup(null, null, page, size, search));
     }
 
     @GetMapping({"/group/{groupId}/summary", "/group/{groupId}/loan/{loanId}/summary"})
-    public ResponseEntity<List<LoanSummaryResponse>> getLoanSummaryByGroup(
+    public ResponseEntity<PaginatedResponse<LoanSummaryResponse>> getLoanSummaryByGroup(
             @PathVariable Long groupId,
-            @PathVariable(required = false) Long loanId) {
-        return ResponseEntity.ok(loanCreationService.getLoanSummaryByGroup(groupId, loanId));
+            @PathVariable(required = false) Long loanId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search) {
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
+        return ResponseEntity.ok(loanCreationService.getLoanSummaryByGroup(groupId, loanId, page, size, search));
     }
 
     @GetMapping("/group/{groupId}/loan/{loanId}/schedules")

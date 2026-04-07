@@ -130,8 +130,13 @@ export default function Reports() {
 
   const fetchGroups = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/groups`, { headers: { "loggedInUser": user?.username || "" } });
-      if (res.ok) setGroups(await res.json());
+      const res = await fetch(`${API_BASE}/api/groups?size=50`, {
+        headers: { "loggedInUser": user?.username || "" },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGroups(data.content !== undefined ? data.content : data);
+      }
     } catch (e) {}
   };
 

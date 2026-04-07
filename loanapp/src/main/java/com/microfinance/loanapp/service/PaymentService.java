@@ -21,7 +21,6 @@ public class PaymentService {
 
     private final UserRepository userRepository;
     private final LoanRepository loanRepository;
-    private final LoanMemberRepository loanMemberRepository;
     private final LoanScheduleRepository loanScheduleRepository;
     private final LoanPaymentRepository loanPaymentRepository;
 
@@ -95,30 +94,34 @@ public class PaymentService {
         for (LoanSchedule s : schedules) {
             double amountToPay = amountMap.get(s.getId());
 
-            // 1. PREVIOUS INSTALLMENT CHECK
-            List<LoanSchedule> previousSchedules = loanScheduleRepository.findByLoanMember_IdAndInstallmentNoLessThan(
-                    s.getLoanMember().getId(), s.getInstallmentNo());
+            // 1. PREVIOUS INSTALLMENT CHECK (Skip for Admin or if explicitly bypassed by UI confirmation)
+            if (!isAdmin && !Boolean.TRUE.equals(request.getBypassPreviousCheck())) {
+                List<LoanSchedule> previousSchedules = loanScheduleRepository.findByLoanMember_IdAndInstallmentNoLessThan(
+                        s.getLoanMember().getId(), s.getInstallmentNo());
 
-            for (LoanSchedule prev : previousSchedules) {
-                if (prev.getStatus() != PaymentStatus.PAID) {
-                    throw new ApiException(HttpStatus.BAD_REQUEST, "previous installment is unpaid");
+                for (LoanSchedule prev : previousSchedules) {
+                    if (prev.getStatus() != PaymentStatus.PAID) {
+                        throw new ApiException(HttpStatus.BAD_REQUEST, "previous installment is unpaid");
+                    }
                 }
-            }
 
-            if (s.getStatus() == PaymentStatus.PAID) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Already fully paid");
+                if (s.getStatus() == PaymentStatus.PAID) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Already fully paid");
+                }
             }
 
             double scheduleTotal = s.getTotal();
             double newPaid = safe(s.getPaidAmount()) + amountToPay;
             double epsilon = 0.01;
 
-            if (amountToPay <= 0) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be > 0");
-            }
+            if (!isAdmin) {
+                if (amountToPay <= 0) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be > 0");
+                }
 
-            if (newPaid - scheduleTotal > epsilon) {
-                throw new ApiException(HttpStatus.BAD_REQUEST, "Exceeds installment amount");
+                if (newPaid - scheduleTotal > epsilon) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, "Exceeds installment amount");
+                }
             }
 
             // SAVE PAYMENT HISTORY
@@ -187,12 +190,30 @@ public class PaymentService {
                 .toList();
     }
     // ================= PENDING LIST =================
-    public List<PendingPaymentDto> getPendingPayments(Long groupId, String timeFilter) {
+    public PaginatedResponse<PendingPaymentDto> getPendingPayments(Long groupId, String timeFilter, int page, int size, String search) {
+        List<PendingPaymentDto> fullList = getPendingPaymentsExport(groupId, timeFilter, search);
+
+        long totalElements = fullList.size();
+        int totalPages = (int) Math.ceil((double) totalElements / size);
+        
+        List<PendingPaymentDto> paginatedResults = fullList.stream()
+                .skip((long) page * size)
+                .limit(size)
+                .collect(Collectors.toList());
+
+        return new PaginatedResponse<>(
+                paginatedResults,
+                totalPages,
+                totalElements,
+                page
+        );
+    }
+
+    public List<PendingPaymentDto> getPendingPaymentsExport(Long groupId, String timeFilter, String search) {
         List<LoanSchedule> schedules = loanScheduleRepository.findByLoanMember_Loan_Status(LoanStatus.ACTIVE);
         LocalDate today = LocalDate.now();
 
-        // 1. Group ALL schedules by (Loan ID + Installment No) first
-        // This ensures totalMembers and paidMembers are always based on the full installment.
+        // 1. Group ALL schedules by (Loan ID + Installment No)
         Map<String, List<LoanSchedule>> grouped = schedules.stream()
                 .collect(Collectors.groupingBy(s -> s.getLoanMember().getLoan().getId() + "-" + s.getInstallmentNo()));
 
@@ -205,12 +226,12 @@ public class PaymentService {
             Loan loan = first.getLoanMember().getLoan();
             LocalDate dueDate = first.getDueDate();
 
-            // A. Apply Group Filter (SKIP if mismatch)
+            // A. Apply Group Filter
             if (groupId != null && !loan.getGroup().getId().equals(groupId)) {
                 continue;
             }
 
-            // B. Apply Time Filter (SKIP if mismatch)
+            // B. Apply Time Filter
             if (timeFilter != null && !timeFilter.equals("ALL")) {
                 boolean matches = false;
                 switch (timeFilter) {
@@ -234,7 +255,15 @@ public class PaymentService {
                 if (!matches) continue;
             }
 
-            // C. Calculate Totals
+            // C. Apply Search Filter (Loan ID or Group Name)
+            if (search != null && !search.isBlank()) {
+                String s = search.toLowerCase().trim();
+                boolean matchesSearch = String.valueOf(loan.getId()).contains(s) || 
+                                       loan.getGroup().getGroupName().toLowerCase().contains(s);
+                if (!matchesSearch) continue;
+            }
+
+            // D. Calculate Totals
             int totalMembers = groupSchedules.size();
             long paidMembers = groupSchedules.stream()
                     .filter(s -> s.getStatus() == PaymentStatus.PAID)
@@ -242,7 +271,7 @@ public class PaymentService {
             
             int pendingMembers = totalMembers - (int)paidMembers;
 
-            // D. Exclude fully paid installments
+            // E. Exclude fully paid installments
             if (pendingMembers > 0) {
                 PendingPaymentDto dto = new PendingPaymentDto();
                 dto.setGroupId(loan.getGroup().getId());

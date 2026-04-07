@@ -13,7 +13,8 @@ public class LoanInitRequest {
     private Long groupId;
     private Double totalLoanAmount;
     private Double interestRate;
-    private Integer durationMonths;
+    private Double dueAmount;
+    private Integer durationWeeks;
     private LocalDate startDate;
     private List<Long> memberIds;
     private LoanChargesDto charges;

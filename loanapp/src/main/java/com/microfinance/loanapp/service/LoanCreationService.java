@@ -125,7 +125,20 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Total loan amount must be positive");
         }
 
-        if (request.getInterestRate() == null || request.getInterestRate() < 0) {
+        Double interestRate = request.getInterestRate();
+        if (request.getDueAmount() != null && request.getDueAmount() > 0) {
+            // Derive interestRate from dueAmount
+            int totalInstallments = getTotalInstallments(group.getCollectionType(), request.getDurationWeeks());
+            double principalPerPerson = Math.floor(request.getTotalLoanAmount());
+            double totalObligation = request.getDueAmount() * totalInstallments;
+            double totalInterest = totalObligation - principalPerPerson;
+            
+            // Formula: interestRate = (totalInterest / principalPerPerson) / request.getDurationWeeks() * 100.0;
+            interestRate = (totalInterest / principalPerPerson) / request.getDurationWeeks() * 100.0;
+            interestRate = roundRate(interestRate);
+        }
+
+        if (interestRate == null || interestRate < 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Interest rate cannot be negative");
         }
 
@@ -135,12 +148,12 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Insufficient vault funds. Available cash: " + availableCash);
         }
 
-        // Validate durationMonths (1–200)
-        if (request.getDurationMonths() == null
-                || request.getDurationMonths() <= 0
-                || request.getDurationMonths() > 200) {
+        // Validate durationWeeks (1–800)
+        if (request.getDurationWeeks() == null
+                || request.getDurationWeeks() <= 0
+                || request.getDurationWeeks() > 800) {
             throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "Duration must be between 1 and 200 months");
+                    "Duration must be between 1 and 800 weeks");
         }
 
         if (request.getCharges() != null) {
@@ -158,7 +171,7 @@ public class LoanCreationService {
 
         // Compute end date = due date of last installment
         LocalDate endDate = calculateEndDate(
-                request.getStartDate(), group.getCollectionType(), request.getDurationMonths());
+                request.getStartDate(), group.getCollectionType(), request.getDurationWeeks());
 
         // Member resolution
         List<MemberGroup> allMembers = memberGroupRepository.findByGroup_Id(group.getId());
@@ -197,11 +210,12 @@ public class LoanCreationService {
 
         return new LoanDraftDto(
                 group.getId(),
-                round(principal * memberGroups.size()), // Set draft total to exact sum
-                request.getInterestRate(),
-                request.getDurationMonths(),
+                round(principal * memberGroups.size()), 
+                interestRate, 
+                request.getDueAmount(), // pass the dueAmount here
+                request.getDurationWeeks(),
                 request.getStartDate(),
-                endDate,           // system-computed, never from user input
+                endDate,
                 members,
                 request.getCharges()
         );
@@ -220,26 +234,42 @@ public class LoanCreationService {
         // Validate start date only; recompute end date — never trust incoming draft value
         validateCollectionDay(draft.getStartDate(), group, "Start date");
         LocalDate computedEndDate = calculateEndDate(
-                draft.getStartDate(), group.getCollectionType(), draft.getDurationMonths());
+                draft.getStartDate(), group.getCollectionType(), draft.getDurationWeeks());
         draft.setEndDate(computedEndDate);
 
-        int total = getTotalInstallments(group.getCollectionType(), draft.getDurationMonths());
+        int total = getTotalInstallments(group.getCollectionType(), draft.getDurationWeeks());
 
         List<LoanSchedulePreviewDto> list = new ArrayList<>();
 
         for (LoanMemberDraftDto m : draft.getMembers()) {
 
-            double totalInterest =
-                    (m.getPrincipalAmount() * draft.getInterestRate() / 100.0) *
-                    draft.getDurationMonths();
+            double mPrincipal = m.getPrincipalAmount();
+            double totalInterest;
+            
+            if (draft.getDueAmount() != null && draft.getDueAmount() > 0) {
+                // Calculation anchored by the fixed dueAmount
+                totalInterest = (draft.getDueAmount() * total) - mPrincipal;
+            } else {
+                // Calculation anchored by interestRate
+                totalInterest = (mPrincipal * draft.getInterestRate() / 100.0) * draft.getDurationWeeks();
+            }
             totalInterest = round(totalInterest);
 
-            // Floor-based even split; last installment absorbs rounding
-            double pEach = Math.floor(m.getPrincipalAmount() / total);
-            double iEach = Math.floor(totalInterest / total);
-
-            double pRem = round(m.getPrincipalAmount() - (pEach * total));
-            double iRem = round(totalInterest - (iEach * total));
+            double pEach = Math.floor(mPrincipal / total);
+            double pRem  = round(mPrincipal - (pEach * total));
+            
+            double iEach;
+            double totalIntExpected;
+            
+            if (draft.getDueAmount() != null && draft.getDueAmount() > 0) {
+                iEach = draft.getDueAmount() - pEach;
+                totalIntExpected = (draft.getDueAmount() * total) - mPrincipal;
+            } else {
+                totalIntExpected = totalInterest;
+                iEach = Math.floor(totalIntExpected / total);
+            }
+            
+            double iRem = round(totalIntExpected - (iEach * total));
 
             // Installment 1 due = startDate; subsequent installments advance by one interval
             LocalDate date = draft.getStartDate();
@@ -250,7 +280,12 @@ public class LoanCreationService {
 
                 if (i == total) {
                     p  += pRem;
-                    in += iRem;
+                    // If dueAmount anchored, last interest must maintain the fixed total
+                    if (draft.getDueAmount() != null && draft.getDueAmount() > 0) {
+                        in = draft.getDueAmount() - p;
+                    } else {
+                        in += iRem;
+                    }
                 }
 
                 p  = round(p);
@@ -265,7 +300,7 @@ public class LoanCreationService {
                         round(p + in)
                 ));
 
-                date = advanceDate(date, group.getCollectionType()); // advance AFTER
+                date = advanceDate(date, group.getCollectionType());
             }
         }
 
@@ -302,7 +337,7 @@ public class LoanCreationService {
         // Final validation gate — start date only; recompute end date authoritatively
         validateCollectionDay(draft.getStartDate(), group, "Start date");
         LocalDate computedEndDate = calculateEndDate(
-                draft.getStartDate(), group.getCollectionType(), draft.getDurationMonths());
+                draft.getStartDate(), group.getCollectionType(), draft.getDurationWeeks());
 
         // Schedule amount validations
         double totalCheck = 0;
@@ -321,13 +356,19 @@ public class LoanCreationService {
                         "Principal mismatch for member " + m.getMemberName());
             }
 
-            // Total obligation must NOT be reduced
-            double interestTotal = round(
-                    (m.getPrincipalAmount() * draft.getInterestRate() / 100.0)
-                    * draft.getDurationMonths()
-            );
-            double expectedTotal = round(m.getPrincipalAmount() + interestTotal);
-            double actualTotal   = round(
+            int totalInst = getTotalInstallments(group.getCollectionType(), draft.getDurationWeeks());
+            double expectedTotal;
+            if (draft.getDueAmount() != null && draft.getDueAmount() > 0) {
+                expectedTotal = round(draft.getDueAmount() * totalInst);
+            } else {
+                double interestTotal = round(
+                        (m.getPrincipalAmount() * draft.getInterestRate() / 100.0)
+                        * draft.getDurationWeeks()
+                );
+                expectedTotal = round(m.getPrincipalAmount() + interestTotal);
+            }
+
+            double actualTotal = round(
                     memberSchedules.stream().mapToDouble(LoanSchedulePreviewDto::getTotal).sum()
             );
             validateScheduleTotals(expectedTotal, actualTotal, m.getMemberName());
@@ -343,7 +384,7 @@ public class LoanCreationService {
         Loan loan = new Loan();
         loan.setGroup(group);
         loan.setInterestRate(draft.getInterestRate());
-        loan.setDurationMonths(draft.getDurationMonths());
+        loan.setDurationWeeks(draft.getDurationWeeks());
         loan.setStartDate(draft.getStartDate());
         loan.setEndDate(computedEndDate);  // always system-computed
         loan.setStatus(LoanStatus.ACTIVE);
@@ -418,7 +459,7 @@ public class LoanCreationService {
      * Rules:
      *  1. ADMIN only.
      *  2. Loan must exist.
-     *  3. DO NOT allow changing: interestRate, durationMonths, startDate, endDate.
+     *  3. DO NOT allow changing: interestRate, durationWeeks, startDate, endDate.
      *     ONLY allow updating: loan.status and loan charges.
      *  4. Allowed to edit charges even if schedule payments exist.
      */
@@ -482,7 +523,7 @@ public class LoanCreationService {
                 .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Member must belong to loan"));
 
         double incomingAmount = request.getAmountPaid();
-        if (incomingAmount <= 0) {
+        if (!isAdmin && incomingAmount <= 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Amount must be greater than 0");
         }
 
@@ -505,7 +546,7 @@ public class LoanCreationService {
                               (charges.getInsuranceFee()  != null ? charges.getInsuranceFee()  : 0.0) +
                               (charges.getSavingAmount()  != null ? charges.getSavingAmount()  : 0.0);
 
-        if (payment.getAmountPaid() + incomingAmount > totalCharges + 0.01) {
+        if (!isAdmin && payment.getAmountPaid() + incomingAmount > totalCharges + 0.01) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Payment exceeds total charges");
         }
 
@@ -563,11 +604,18 @@ public class LoanCreationService {
         validateAdmin(loggedInUser);
         AddMemberContext ctx = calcAddMemberContext(loanId, memberId);
         List<AddMemberScheduleDto> schedules = buildScheduleDtos(ctx);
+
+        Double standardDue = 0.0;
+        if (!schedules.isEmpty()) {
+            standardDue = schedules.get(0).getTotal();
+        }
+
         return new AddMemberPreviewResponse(
                 loanId,
                 ctx.member().getId(),
                 ctx.member().getName(),
                 ctx.principalAmount(),
+                standardDue,
                 schedules
         );
     }
@@ -636,7 +684,7 @@ public class LoanCreationService {
         // Total obligation must NOT be reduced
         double interestTotal = round(
                 (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
-                * ctx.loan().getDurationMonths()
+                * ctx.loan().getDurationWeeks()
         );
         double expectedTotal = round(ctx.principalAmount() + interestTotal);
         double actualTotal   = round(
@@ -674,23 +722,34 @@ public class LoanCreationService {
     //  GET LOAN SUMMARY BY GROUP
     // =========================================================
 
-    public List<LoanSummaryResponse> getLoanSummaryByGroup(Long groupId, Long loanId) {
-        List<Loan> loans;
+    public PaginatedResponse<LoanSummaryResponse> getLoanSummaryByGroup(Long groupId, Long loanId, int page, int size, String search) {
+        org.springframework.data.domain.Pageable pageable = org.springframework.data.domain.PageRequest.of(page, size);
+        org.springframework.data.domain.Page<Loan> loanPage;
+
         if (loanId != null) {
-            loans = List.of(loanRepository.findById(loanId)
-                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found")));
-            if (groupId != null && !loans.get(0).getGroup().getId().equals(groupId)) {
+            Loan loan = loanRepository.findById(loanId)
+                    .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Loan not found"));
+            if (groupId != null && !loan.getGroup().getId().equals(groupId)) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "Loan does not belong to this group");
             }
+            loanPage = new org.springframework.data.domain.PageImpl<>(List.of(loan), pageable, 1);
         } else if (groupId != null) {
-            loans = loanRepository.findByGroup_Id(groupId);
+            if (search != null && !search.isBlank()) {
+                loanPage = loanRepository.searchLoansByGroup(groupId, search.trim(), pageable);
+            } else {
+                loanPage = loanRepository.findByGroup_Id(groupId, pageable);
+            }
         } else {
-            loans = loanRepository.findAll();
+            if (search != null && !search.isBlank()) {
+                loanPage = loanRepository.searchLoans(search.trim(), pageable);
+            } else {
+                loanPage = loanRepository.findAll(pageable);
+            }
         }
 
         List<LoanSummaryResponse> summaryList = new ArrayList<>();
 
-        for (Loan loan : loans) {
+        for (Loan loan : loanPage.getContent()) {
             List<LoanMember> loanMembers = loanMemberRepository.findByLoan_Id(loan.getId());
             double totalPrincipal = loanMembers.stream()
                     .mapToDouble(LoanMember::getPrincipalAmount)
@@ -703,7 +762,7 @@ public class LoanCreationService {
             summary.setTotalMembers(loanMembers.size());
             summary.setTotalPrincipal(round(totalPrincipal));
             summary.setInterestRate(loan.getInterestRate());
-            summary.setDurationMonths(loan.getDurationMonths());
+            summary.setDurationWeeks(loan.getDurationWeeks());
             summary.setCollectionType(loan.getGroup().getCollectionType().name());
             summary.setStatus(loan.getStatus().name());
 
@@ -722,7 +781,12 @@ public class LoanCreationService {
             summaryList.add(summary);
         }
 
-        return summaryList;
+        return new PaginatedResponse<>(
+                summaryList,
+                loanPage.getTotalPages(),
+                loanPage.getTotalElements(),
+                loanPage.getNumber()
+        );
     }
 
     // =========================================================
@@ -966,6 +1030,7 @@ public class LoanCreationService {
             Loan loan,
             Member member,
             double principalAmount,
+            double exactBaseInterest,
             int totalInstallments,
             int passedInstallments,
             int remaining,
@@ -1002,7 +1067,7 @@ public class LoanCreationService {
         }
 
         CollectionType cType = group.getCollectionType();
-        int total = getTotalInstallments(cType, loan.getDurationMonths());
+        int total = getTotalInstallments(cType, loan.getDurationWeeks());
 
         // Calculate how many installments have already passed
         // Installment 1 = startDate. If startDate is before today, it's passed.
@@ -1027,15 +1092,23 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "No existing members found for loan");
         }
-        double principalAmount = existingMembers.get(0).getPrincipalAmount();
+        LoanMember firstMember = existingMembers.get(0);
+        double principalAmount = firstMember.getPrincipalAmount();
 
-        return new AddMemberContext(loan, member, principalAmount, total, passedInstallments, remaining, cType);
+        // Dynamically compute exact total interest of the existing member to circumvent
+        // discrepancy from rounded interest rate.
+        double exactBaseInterest = loanScheduleRepository.findByLoanMember_Id(firstMember.getId())
+                .stream()
+                .mapToDouble(s -> s.getInterest())
+                .sum();
+
+        return new AddMemberContext(loan, member, principalAmount, exactBaseInterest, total, passedInstallments, remaining, cType);
     }
 
     /**
      * Builds schedule DTOs for a new member joining an active loan.
      * Rule §4 — Redistribute interest over REMAINING installments.
-     *   Rate is MONTHLY: totalInterest = principal × (rate/100) × durationMonths
+     *   Rate is WEEKLY: totalInterest = principal × (rate/100) × durationWeeks
      *   base per installment = totalInterest / totalInstallments
      *   missed = passedInstallments × base  →  redistributed over remaining
      *   Net: pEach = principal / remaining,  iEach = totalInterest / remaining
@@ -1047,47 +1120,56 @@ public class LoanCreationService {
      */
     private List<AddMemberScheduleDto> buildScheduleDtos(AddMemberContext ctx) {
 
-        // Full-duration interest using monthly rate
-        double totalInterest = round(
-                (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
-                * ctx.loan().getDurationMonths()
-        );
+        double totalI = ctx.exactBaseInterest();
+        double totalP = ctx.principalAmount();
+        int totalInst = ctx.totalInstallments();
+        int passed = ctx.passedInstallments();
 
         // Base calculation as if present from start
-        double basePEach = Math.floor(ctx.principalAmount() / ctx.totalInstallments());
-        double baseIEach = Math.floor(totalInterest / ctx.totalInstallments());
+        double bp = Math.floor(totalP / totalInst);
+        double bi = Math.floor(totalI / totalInst);
 
-        // Calculate missed portions
-        double missedP = basePEach * ctx.passedInstallments();
-        double missedI = baseIEach * ctx.passedInstallments();
+        // Total missed portions to catch up
+        double missedP = bp * passed;
+        double missedI = bi * passed;
 
-        // Target amounts per remaining schedule
-        double pEach = basePEach + Math.floor(missedP / ctx.remaining());
-        double iEach = baseIEach + Math.floor(missedI / ctx.remaining());
-
-        // Remaining balance goes to last installment (handles any rounding diffs)
-        double pRem = round(ctx.principalAmount() - (pEach * ctx.remaining()));
-        double iRem = round(totalInterest - (iEach * ctx.remaining()));
-
-        // Rule §5: start from loan.startDate, skip passed intervals
+        // Advance date to the first remaining installment
         LocalDate date = ctx.loan().getStartDate();
-        for (int skip = 0; skip < ctx.passedInstallments(); skip++) {
+        for (int skip = 0; skip < passed; skip++) {
             date = advanceDate(date, ctx.collectionType());
         }
 
+        int remainingCount = totalInst - passed;
+
         List<AddMemberScheduleDto> result = new ArrayList<>();
-        int installmentCounter = 0;
+        double accP = 0.0;
+        double accI = 0.0;
 
-        for (int i = ctx.passedInstallments() + 1; i <= ctx.totalInstallments(); i++) {
-            installmentCounter++;
+        // Spread the missed amount across ALL remaining installments
+        double pEachExtra = missedP / remainingCount;
+        double iEachExtra = missedI / remainingCount;
 
-            boolean isLast = (installmentCounter == ctx.remaining());
-            double p  = isLast ? round(pEach + pRem) : round(pEach);
-            double in = isLast ? round(iEach + iRem) : round(iEach);
+        for (int i = passed + 1; i <= totalInst; i++) {
+            boolean isLast = (i == totalInst);
 
-            result.add(new AddMemberScheduleDto(i, date, p, in, round(p + in)));
+            double pVal;
+            double iVal;
 
-            date = advanceDate(date, ctx.collectionType()); // advance AFTER
+            if (isLast) {
+                // Final one takes whatever is left to ensure exact total
+                pVal = round(totalP - accP);
+                iVal = round(totalI - accI);
+            } else {
+                // Each remaining installment takes its base share + a proportional share of the missed amount
+                pVal = round(bp + pEachExtra);
+                iVal = round(bi + iEachExtra);
+            }
+
+            result.add(new AddMemberScheduleDto(i, date, pVal, iVal, round(pVal + iVal)));
+            accP = round(accP + pVal);
+            accI = round(accI + iVal);
+
+            date = advanceDate(date, ctx.collectionType());
         }
 
         return result;
@@ -1097,16 +1179,18 @@ public class LoanCreationService {
     //  HELPERS
     // =========================================================
 
-    private int getTotalInstallments(CollectionType type, int months) {
+    private int getTotalInstallments(CollectionType type, Integer weeks) {
+        if (type == null || weeks == null) return 0;
         return switch (type) {
-            case DAILY    -> months * 30;
-            case WEEKLY   -> months * 4;
-            case BIWEEKLY -> months * 2;
-            case MONTHLY  -> months;
+            case DAILY    -> weeks * 7;
+            case WEEKLY   -> weeks;
+            case BIWEEKLY -> weeks / 2;
+            case MONTHLY  -> weeks / 4;
         };
     }
 
     private LocalDate advanceDate(LocalDate d, CollectionType t) {
+        if (d == null || t == null) return d;
         return switch (t) {
             case DAILY    -> d.plusDays(1);
             case WEEKLY   -> d.plusDays(7);
@@ -1120,17 +1204,22 @@ public class LoanCreationService {
      * Installment 1 is due on startDate; each subsequent installment
      * advances by one collection interval.
      */
-    private LocalDate calculateEndDate(LocalDate startDate, CollectionType type, int durationMonths) {
-        int total = getTotalInstallments(type, durationMonths);
+    private LocalDate calculateEndDate(LocalDate startDate, CollectionType type, int durationWeeks) {
+        int total = getTotalInstallments(type, (Integer) durationWeeks);
         LocalDate date = startDate;
         for (int i = 1; i < total; i++) {
             date = advanceDate(date, type);
         }
-        return date; // due date of the last installment
+        return date; 
     }
 
     private double round(double v) {
         return Math.round(v);
+    }
+
+    /** Rounds interest rate to 2 decimal places (preserves values like 0.91). */
+    private double roundRate(double v) {
+        return Math.round(v * 100.0) / 100.0;
     }
 
     /**

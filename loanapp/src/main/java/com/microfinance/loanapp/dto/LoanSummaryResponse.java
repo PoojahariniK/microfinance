@@ -14,7 +14,7 @@ public class LoanSummaryResponse {
     private Integer totalMembers;
     private Double totalPrincipal;
     private Double interestRate;
-    private Integer durationMonths;
+    private Integer durationWeeks;
     private String collectionType;
     private String status;
     private LoanChargesDto charges;

@@ -172,14 +172,29 @@ public class MemberService {
     }
 
     // ================= GET ALL =================
-    public List<MemberResponse> getAllMembers(String loggedInUser) {
+    public PaginatedResponse<MemberResponse> getAllMembers(int page, int size, String search, String loggedInUser) {
 
         validateUser(loggedInUser);
-
-        return memberRepository.findAll()
-                .stream()
+        
+        org.springframework.data.domain.Pageable pageable = org.springframework.data.domain.PageRequest.of(page, size);
+        org.springframework.data.domain.Page<Member> memberPage;
+        
+        if (search != null && !search.isBlank()) {
+            memberPage = memberRepository.searchMembers(search.trim(), pageable);
+        } else {
+            memberPage = memberRepository.findAll(pageable);
+        }
+        
+        List<MemberResponse> content = memberPage.getContent().stream()
                 .map(this::mapToResponse)
                 .collect(Collectors.toList());
+                
+        return new PaginatedResponse<>(
+                content,
+                memberPage.getTotalPages(),
+                memberPage.getTotalElements(),
+                memberPage.getNumber()
+        );
     }
 
     // ================= GET BY ID =================
@@ -193,18 +208,33 @@ public class MemberService {
         return mapToResponse(member);
     }
 
-    // ================= GET BY GROUP =================
-    public List<MemberResponse> getMembersByGroup(Long groupId, String loggedInUser) {
+    // ================= GET MEMBERS BY GROUP =================
+    public PaginatedResponse<MemberResponse> getMembersByGroup(Long groupId, int page, int size, String search, String loggedInUser) {
 
         validateUser(loggedInUser);
+        groupRepository.findById(groupId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Group not found"));
 
-        List<MemberGroup> mappings =
-                memberGroupRepository.findByGroup_IdAndStatus(groupId, MemberStatus.ACTIVE);
-
-        return mappings.stream()
-                .map(MemberGroup::getMember)
-                .map(this::mapToResponse)
+        org.springframework.data.domain.Pageable pageable = org.springframework.data.domain.PageRequest.of(page, size);
+        org.springframework.data.domain.Page<MemberGroup> memberGroupPage;
+        
+        if (search != null && !search.isBlank()) {
+            memberGroupPage = memberGroupRepository.searchInGroup(groupId, MemberStatus.ACTIVE, search.trim(), pageable);
+        } else {
+            memberGroupPage = memberGroupRepository.findByGroup_IdAndStatus(groupId, MemberStatus.ACTIVE, pageable);
+        }
+        
+        List<MemberResponse> content = memberGroupPage.getContent()
+                .stream()
+                .map(mg -> mapToResponse(mg.getMember()))
                 .collect(Collectors.toList());
+                
+        return new PaginatedResponse<>(
+                content,
+                memberGroupPage.getTotalPages(),
+                memberGroupPage.getTotalElements(),
+                memberGroupPage.getNumber()
+        );
     }
 
     // ================= ADD MEMBER =================

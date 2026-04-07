@@ -46,10 +46,26 @@ public class PaymentController {
     }
 
     @GetMapping("/pending")
-    public List<PendingPaymentDto> getPending(
+    public PaginatedResponse<PendingPaymentDto> getPending(
             @RequestParam(required = false) Long groupId,
             @RequestParam(required = false) String timeFilter,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "25") int size,
+            @RequestParam(defaultValue = "") String search,
             @RequestHeader("loggedInUser") String user) {
-        return paymentService.getPendingPayments(groupId, timeFilter);
+        if (size > 50) {
+            throw new com.microfinance.loanapp.exception.ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "Page size cannot exceed 50");
+        }
+        return paymentService.getPendingPayments(groupId, timeFilter, page, size, search);
+    }
+
+    @GetMapping("/pending/export")
+    public List<PendingPaymentDto> getPendingExport(
+            @RequestParam(required = false) Long groupId,
+            @RequestParam(required = false) String timeFilter,
+            @RequestParam(defaultValue = "") String search,
+            @RequestHeader("loggedInUser") String user) {
+        
+        return paymentService.getPendingPaymentsExport(groupId, timeFilter, search);
     }
 }

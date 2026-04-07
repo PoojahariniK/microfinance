@@ -8,5 +8,6 @@ import java.util.List;
 public class AddMemberConfirmRequest {
     private Long memberId;
     private Double principalAmount;
+    private Double dueAmount;
     private List<AddMemberScheduleDto> schedules;
 }

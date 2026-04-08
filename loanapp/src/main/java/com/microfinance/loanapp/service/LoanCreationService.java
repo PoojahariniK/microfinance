@@ -368,6 +368,26 @@ public class LoanCreationService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "Total loan mismatch");
         }
 
+        // Determine canonical per-member values for robust late-add validation
+        int canonicalTotalInst = getTotalInstallments(group.getCollectionType(), draft.getDurationWeeks());
+        double perMemberPrincipal = draft.getMembers().get(0).getPrincipalAmount();
+        double canonicalInterestTotal;
+        double canonicalTotalObligation;
+        Double canonicalDueAmount = draft.getDueAmount();
+        
+        if (canonicalDueAmount != null && canonicalDueAmount > 0) {
+            canonicalTotalObligation = wholeRound(canonicalDueAmount * canonicalTotalInst);
+            canonicalInterestTotal = wholeRound(canonicalTotalObligation - perMemberPrincipal);
+        } else {
+            canonicalInterestTotal = wholeRound(
+                    (perMemberPrincipal * draft.getInterestRate() / 100.0)
+                    * draft.getDurationWeeks()
+            );
+            canonicalTotalObligation = wholeRound(perMemberPrincipal + canonicalInterestTotal);
+            // Default computed approximation for reporting if no fixed rate
+            canonicalDueAmount = Math.floor(canonicalTotalObligation / canonicalTotalInst);
+        }
+
         // Persist Loan
         Loan loan = new Loan();
         loan.setGroup(group);
@@ -375,6 +395,9 @@ public class LoanCreationService {
         loan.setDurationWeeks(draft.getDurationWeeks());
         loan.setStartDate(draft.getStartDate());
         loan.setEndDate(computedEndDate);  // always system-computed
+        loan.setDueAmount(canonicalDueAmount);
+        loan.setTotalObligation(canonicalTotalObligation);
+        loan.setTotalInterest(canonicalInterestTotal);
         loan.setStatus(LoanStatus.ACTIVE);
         loan.setCreatedAt(LocalDateTime.now());
         loan = loanRepository.save(loan);
@@ -593,17 +616,15 @@ public class LoanCreationService {
         AddMemberContext ctx = calcAddMemberContext(loanId, memberId);
         List<AddMemberScheduleDto> schedules = buildScheduleDtos(ctx);
 
-        Double standardDue = 0.0;
-        if (!schedules.isEmpty()) {
-            standardDue = schedules.get(0).getTotal();
-        }
-
         return new AddMemberPreviewResponse(
                 loanId,
                 ctx.member().getId(),
                 ctx.member().getName(),
                 ctx.principalAmount(),
-                standardDue,
+                ctx.getExpectedDueAmount(),
+                ctx.principalAmount(),
+                ctx.getExpectedTotalInterest(),
+                ctx.getExpectedTotalObligation(),
                 schedules
         );
     }
@@ -670,11 +691,7 @@ public class LoanCreationService {
         }
 
         // Total obligation must NOT be reduced
-        double interestTotal = wholeRound(
-                (ctx.principalAmount() * ctx.loan().getInterestRate() / 100.0)
-                * ctx.loan().getDurationWeeks()
-        );
-        double expectedTotal = wholeRound(ctx.principalAmount() + interestTotal);
+        double expectedTotal = wholeRound(ctx.getExpectedTotalObligation());
         double actualTotal   = wholeRound(
                 sorted.stream().mapToDouble(AddMemberScheduleDto::getTotal).sum()
         );
@@ -1023,7 +1040,23 @@ public class LoanCreationService {
             int remaining,
             CollectionType collectionType,
             List<LoanSchedule> refSchedules
-    ) {}
+    ) {
+        public double getExpectedTotalObligation() {
+            if (loan.getTotalObligation() != null && loan.getTotalObligation() > 0) return loan.getTotalObligation();
+            return refSchedules.stream().mapToDouble(LoanSchedule::getTotal).sum();
+        }
+        
+        public double getExpectedTotalInterest() {
+            if (loan.getTotalInterest() != null && loan.getTotalInterest() > 0) return loan.getTotalInterest();
+            return refSchedules.stream().mapToDouble(LoanSchedule::getInterest).sum();
+        }
+        
+        public Double getExpectedDueAmount() {
+            if (loan.getDueAmount() != null && loan.getDueAmount() > 0) return loan.getDueAmount();
+            if (!refSchedules.isEmpty()) return refSchedules.get(0).getTotal();
+            return 0.0;
+        }
+    }
 
     private AddMemberContext calcAddMemberContext(Long loanId, Long memberId) {
 

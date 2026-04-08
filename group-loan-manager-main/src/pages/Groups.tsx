@@ -161,8 +161,13 @@ export default function Groups() {
   };
 
   const handleCreateSubmit = async () => {
-    if (!createForm.groupName || !createForm.collectionType || !createForm.collectionDay || !createForm.collectionStaffId) {
-      toast.error("All fields are required to create a group.");
+    const isDayRequired = createForm.collectionType === "WEEKLY" || createForm.collectionType === "BIWEEKLY";
+    if (!createForm.groupName || !createForm.collectionType || !createForm.collectionStaffId) {
+      toast.error("Group Name, Type and Collector are required.");
+      return;
+    }
+    if (isDayRequired && !createForm.collectionDay) {
+      toast.error("Collection Day is required for Weekly/Biweekly groups.");
       return;
     }
     setError("");
@@ -176,7 +181,7 @@ export default function Groups() {
         body: JSON.stringify({
           groupName: createForm.groupName,
           collectionType: createForm.collectionType,
-          collectionDay: createForm.collectionDay,
+          collectionDay: isDayRequired ? createForm.collectionDay : null,
           collectionStaffId: parseInt(createForm.collectionStaffId)
         }),
       });
@@ -216,8 +221,13 @@ export default function Groups() {
   };
 
   const handleEditSubmit = async () => {
-    if (!editForm.groupName || !editForm.collectionType || !editForm.collectionDay) {
-      toast.error("Fields cannot be empty.");
+    const isDayRequired = editForm.collectionType === "WEEKLY" || editForm.collectionType === "BIWEEKLY";
+    if (!editForm.groupName || !editForm.collectionType) {
+      toast.error("Group name and Type cannot be empty.");
+      return;
+    }
+    if (isDayRequired && !editForm.collectionDay) {
+      toast.error("Collection Day is required for Weekly/Biweekly groups.");
       return;
     }
     if (isAdmin && !editForm.collectionStaffId) {
@@ -236,7 +246,7 @@ export default function Groups() {
         body: JSON.stringify({
           groupName: editForm.groupName,
           collectionType: editForm.collectionType,
-          collectionDay: editForm.collectionDay,
+          collectionDay: isDayRequired ? editForm.collectionDay : null,
           collectionStaffId: editForm.collectionStaffId ? parseInt(editForm.collectionStaffId) : null,
           status: editForm.status
         }),
@@ -373,21 +383,23 @@ export default function Groups() {
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label className="text-xs">Collection Day</Label>
-              <Select value={createForm.collectionDay} onValueChange={v => setCreateForm({ ...createForm, collectionDay: v })}>
-                <SelectTrigger className="mt-1"><SelectValue placeholder="Select Day" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="MONDAY">Monday</SelectItem>
-                  <SelectItem value="TUESDAY">Tuesday</SelectItem>
-                  <SelectItem value="WEDNESDAY">Wednesday</SelectItem>
-                  <SelectItem value="THURSDAY">Thursday</SelectItem>
-                  <SelectItem value="FRIDAY">Friday</SelectItem>
-                  <SelectItem value="SATURDAY">Saturday</SelectItem>
-                  <SelectItem value="SUNDAY">Sunday</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            { (createForm.collectionType === "WEEKLY" || createForm.collectionType === "BIWEEKLY") && (
+              <div>
+                <Label className="text-xs">Collection Day</Label>
+                <Select value={createForm.collectionDay} onValueChange={v => setCreateForm({ ...createForm, collectionDay: v })}>
+                  <SelectTrigger className="mt-1"><SelectValue placeholder="Select Day" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="MONDAY">Monday</SelectItem>
+                    <SelectItem value="TUESDAY">Tuesday</SelectItem>
+                    <SelectItem value="WEDNESDAY">Wednesday</SelectItem>
+                    <SelectItem value="THURSDAY">Thursday</SelectItem>
+                    <SelectItem value="FRIDAY">Friday</SelectItem>
+                    <SelectItem value="SATURDAY">Saturday</SelectItem>
+                    <SelectItem value="SUNDAY">Sunday</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             <div className="col-span-2">
               <Label className="text-xs">Assigned Collector</Label>
               <Select value={createForm.collectionStaffId} onValueChange={v => setCreateForm({ ...createForm, collectionStaffId: v })}>
@@ -425,21 +437,23 @@ export default function Groups() {
                 </SelectContent>
               </Select>
             </div>
-            <div>
-              <Label className="text-xs">Collection Day</Label>
-              <Select value={editForm?.collectionDay || ""} onValueChange={v => setEditForm({ ...editForm, collectionDay: v })}>
-                <SelectTrigger className="mt-1"><SelectValue placeholder="Select Day" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="MONDAY">Monday</SelectItem>
-                  <SelectItem value="TUESDAY">Tuesday</SelectItem>
-                  <SelectItem value="WEDNESDAY">Wednesday</SelectItem>
-                  <SelectItem value="THURSDAY">Thursday</SelectItem>
-                  <SelectItem value="FRIDAY">Friday</SelectItem>
-                  <SelectItem value="SATURDAY">Saturday</SelectItem>
-                  <SelectItem value="SUNDAY">Sunday</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            { (editForm?.collectionType === "WEEKLY" || editForm?.collectionType === "BIWEEKLY") && (
+              <div>
+                <Label className="text-xs">Collection Day</Label>
+                <Select value={editForm?.collectionDay || ""} onValueChange={v => setEditForm({ ...editForm, collectionDay: v })}>
+                  <SelectTrigger className="mt-1"><SelectValue placeholder="Select Day" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="MONDAY">Monday</SelectItem>
+                    <SelectItem value="TUESDAY">Tuesday</SelectItem>
+                    <SelectItem value="WEDNESDAY">Wednesday</SelectItem>
+                    <SelectItem value="THURSDAY">Thursday</SelectItem>
+                    <SelectItem value="FRIDAY">Friday</SelectItem>
+                    <SelectItem value="SATURDAY">Saturday</SelectItem>
+                    <SelectItem value="SUNDAY">Sunday</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
             
             {isAdmin && (
               <div className="col-span-2">

@@ -510,8 +510,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
       setAddMemberSchedule(data.schedules);
       setInitialAddMemberSchedule(JSON.parse(JSON.stringify(data.schedules)));
       setAddMemberAdminTarget(data.dueAmount || 0);
-      setExpectedAddMemberPrincipal(data.schedules.reduce((sum: any, s: any) => sum + s.principal, 0));
-      setExpectedAddMemberInterest(data.schedules.reduce((sum: any, s: any) => sum + s.interest, 0));
+      setExpectedAddMemberPrincipal(data.expectedTotalPrincipal);
+      setExpectedAddMemberInterest(data.expectedTotalInterest);
       setAddMemberStep(2);
     } catch (err: any) {
       toast.error(err.message);
@@ -1213,8 +1213,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
                   <th>Group Name</th>
                   <th>Members</th>
                   <th>Total Principal</th>
-                  <th>Interest</th>
-                  <th>Duration</th>
+                  <th>Interest(per week)</th>
+                  <th>Duration(weeks)</th>
                   <th>Type</th>
                   <th>Status</th>
                   <th>Charges</th>

@@ -41,4 +41,13 @@ public class Loan {
 
     @Column(nullable = false)
     private LocalDateTime createdAt;
+
+    @Column(nullable = true)
+    private Double dueAmount;
+
+    @Column(nullable = true)
+    private Double totalObligation;
+
+    @Column(nullable = true)
+    private Double totalInterest;
 }

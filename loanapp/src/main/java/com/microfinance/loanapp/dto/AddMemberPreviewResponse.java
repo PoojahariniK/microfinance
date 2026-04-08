@@ -15,5 +15,8 @@ public class AddMemberPreviewResponse {
     private String memberName;
     private Double principalAmount;
     private Double dueAmount;
+    private Double expectedTotalPrincipal;
+    private Double expectedTotalInterest;
+    private Double expectedTotalObligation;
     private List<AddMemberScheduleDto> schedules;
 }

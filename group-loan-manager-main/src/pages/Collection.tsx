@@ -217,7 +217,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         if (adminEditMode) amountToApply = userVal - (m.paidAmount || 0);
         if (amountToApply <= 0) continue;
 
-        const memberId = availableSchedules[0]?.members?.find(sm => sm.memberName === m.memberName)?.memberId;
+        const memberId = m.memberId;
         if (memberId) {
           const unpaidPrevious = availableSchedules.filter(s => 
             s.installmentNo < collectionData.installmentNo

@@ -57,6 +57,9 @@ export default function Collection() {
   const [showPreviousUnpaidConfirm, setShowPreviousUnpaidConfirm] = useState(false);
   const [previousUnpaidWarningList, setPreviousUnpaidWarningList] = useState<{ memberName: string; unpaidInstallments: number[] }[]>([]);
 
+  // Future Installment Warning
+  const [showFutureInstallmentConfirm, setShowFutureInstallmentConfirm] = useState(false);
+
   // Loan Charges
   const [chargeStatus, setChargeStatus] = useState<ChargeStatusResponse | null>(null);
   const [paidChargesMembers, setPaidChargesMembers] = useState<ChargePaymentMemberDto[]>([]);
@@ -118,13 +121,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     } catch (e) { toast.error("Failed to fetch active loans"); }
   };
 
-  const handleLoanChange = async (loanId: string, groupIdOverride?: string) => {
+  const refreshSchedules = async (loanId: string, groupIdOverride?: string) => {
     const gid = groupIdOverride || selectedGroup;
-    setSelectedLoanId(loanId);
-    setSelectedDueNumber("");
-    setCollectionData(null);
-    setChargeInputs({});
-    
     try {
       const res = await fetch(`${API_BASE}/api/loans/group/${gid}/loan/${loanId}/schedules`, {
         headers: { "loggedInUser": user?.username || "" }
@@ -133,8 +131,18 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
         const schedules: LoanScheduleGroupResponse[] = await res.json();
         setAvailableSchedules(schedules);
       }
-      fetchLoanCharges(loanId);
     } catch (e) {}
+  };
+
+  const handleLoanChange = async (loanId: string, groupIdOverride?: string) => {
+    const gid = groupIdOverride || selectedGroup;
+    setSelectedLoanId(loanId);
+    setSelectedDueNumber("");
+    setCollectionData(null);
+    setChargeInputs({});
+    
+    await refreshSchedules(loanId, gid);
+    fetchLoanCharges(loanId);
   };
 
   const fetchLoanCharges = async (loanId: string) => {
@@ -166,16 +174,19 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     setSelectedDueNumber(dueNum);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/payments/collection?groupId=${gid}&loanId=${lid}&installmentNo=${dueNum}`, {
-        headers: { "loggedInUser": user?.username || "" }
-      });
+      // Fetch collection data AND refresh schedules in parallel so past-dues
+      // check always has the latest paidAmount values regardless of session history.
+      const [res] = await Promise.all([
+        fetch(`${API_BASE}/api/payments/collection?groupId=${gid}&loanId=${lid}&installmentNo=${dueNum}`, {
+          headers: { "loggedInUser": user?.username || "" }
+        }),
+        refreshSchedules(lid, gid)
+      ]);
       if (!res.ok) throw new Error("Failed to load collection demand sheet");
       const collData: CollectionResponse = await res.json();
       setCollectionData(collData);
       const overrides: Record<number, number> = {};
       collData?.members?.forEach(m => {
-        // Clear input field (0) for any installment already has payments (PARTIAL or PAID).
-        // Only pre-fill (totalDue) for purely UNPAID installments as a data-entry helper.
         const isActuallyUnpaid = m.status === 'UNPAID' && (m.paidAmount || 0) === 0;
         if (adminEditMode) {
           overrides[m.loanScheduleId] = m.paidAmount || 0;
@@ -202,7 +213,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
     return false;
   };
 
-  const handleSaveCollection = async (confirmedPayments?: PaymentEntryDto[], bypassPreviousCheck: boolean = false) => {
+  const handleSaveCollection = async (confirmedPayments?: PaymentEntryDto[], bypassPreviousCheck: boolean = false, bypassFutureCheck: boolean = false) => {
     if (!collectionData) return;
     
     let activePayload: PaymentEntryDto[] = confirmedPayments || [];
@@ -224,7 +235,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
           ).map(s => {
             const memberSched = s.members.find(sm => sm.memberId === memberId);
             return { installmentNo: s.installmentNo, memberSched };
-          }).filter(s => s.memberSched && s.memberSched.status !== 'PAID');
+          }).filter(s => {
+            if (!s.memberSched) return false;
+            const remaining = s.memberSched.total - (s.memberSched.paidAmount || 0);
+            return remaining > 0.01;
+          });
 
           if (unpaidPrevious.length > 0) {
             membersWithUnpaidPrevious.push({
@@ -241,6 +256,20 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
          return; // Suspend execution
       }
     }
+
+    // ── FUTURE DATE CHECK ──────────────────────────────────────────────────
+    // If the installment's due date is strictly after today, warn the user
+    // before letting them pay it. This is independent of all other checks.
+    if (!bypassFutureCheck && !confirmedPayments) {
+      const dueDate = collectionData.dueDate ? new Date(collectionData.dueDate) : null;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      if (dueDate && dueDate > today) {
+        setShowFutureInstallmentConfirm(true);
+        return; // Suspend — resume via dialog
+      }
+    }
+    // ───────────────────────────────────────────────────────────────────────
 
     if (!confirmedPayments) {
       let validationError = null;
@@ -386,6 +415,8 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL;
          return next;
        });
 
+       // Refresh schedules so past-dues check uses up-to-date paidAmount values
+       await refreshSchedules(selectedLoanId);
        await handleDueChange(selectedDueNumber);
        setShowOverpaymentConfirm(false);
        setPreviousUnpaidWarningList([]);
@@ -1245,6 +1276,50 @@ availableSchedules[0]?.members?.forEach((m) => {
                    >
                      Cancel
                    </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {/* FUTURE INSTALLMENT WARNING DIALOG */}
+          <Dialog open={showFutureInstallmentConfirm} onOpenChange={setShowFutureInstallmentConfirm}>
+            <DialogContent className="max-w-sm bg-white border-2 border-blue-400/30 shadow-2xl">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-black uppercase tracking-tight flex items-center gap-2 text-blue-700">
+                  <ShieldAlert className="h-6 w-6 text-blue-500" />
+                  Future Installment
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 py-2">
+                <p className="text-sm font-semibold text-muted-foreground leading-relaxed">
+                  The installment due date{" "}
+                  <span className="font-black text-blue-700">
+                    ({collectionData?.dueDate})
+                  </span>{" "}
+                  is in the future. You are about to record a payment before it is due.
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Are you sure you want to proceed with collecting this future installment?
+                </p>
+                <div className="flex flex-col gap-2 pt-2">
+                  <Button
+                    className="w-full h-10 font-black uppercase tracking-wider bg-blue-600 hover:bg-blue-700 text-white shadow-md"
+                    onClick={() => {
+                      setShowFutureInstallmentConfirm(false);
+                      handleSaveCollection(undefined, true, true);
+                    }}
+                    disabled={loading}
+                  >
+                    {loading ? "PROCESSING..." : "Yes, Proceed"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    className="w-full h-10 font-bold uppercase tracking-wider text-muted-foreground hover:text-gray-600 hover:bg-gray-50"
+                    onClick={() => setShowFutureInstallmentConfirm(false)}
+                    disabled={loading}
+                  >
+                    Cancel
+                  </Button>
                 </div>
               </div>
             </DialogContent>

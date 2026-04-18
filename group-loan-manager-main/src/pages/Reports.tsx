@@ -1,13 +1,45 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, Component } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Download, Printer, Users, FileText, Banknote, AlertCircle, TrendingUp, History, Loader2, Calendar as CalendarIcon, ChevronDown, ChevronUp, Search, Table as TableIcon, Wallet } from "lucide-react";
+import { Download, Printer, Users, FileText, Banknote, AlertCircle, TrendingUp, History, Loader2, Calendar as CalendarIcon, ChevronDown, ChevronUp, Search, Table as TableIcon, Wallet, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { exportToCSV, exportToPDF, exportBalanceSheetCSV, exportBalanceSheetPDF, exportProfitLossCSV, exportProfitLossPDF } from "@/lib/reportExportUtils";
 import { Input } from "@/components/ui/input";
+
+// --- Error Boundary ---
+class ReportErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: string }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: "" };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error: error?.message || "Unknown error" };
+  }
+  componentDidCatch(error: any, info: any) {
+    console.error("[Reports] Render error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center py-40 gap-4">
+          <AlertCircle className="h-12 w-12 text-rose-400" />
+          <p className="text-sm font-black uppercase tracking-widest text-rose-600">Report Render Error</p>
+          <p className="text-xs text-muted-foreground max-w-sm text-center">{this.state.error}</p>
+          <button
+            onClick={() => this.setState({ hasError: false, error: "" })}
+            className="mt-2 flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-white text-xs font-bold"
+          >
+            <RefreshCw className="h-3.5 w-3.5" /> Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // --- Types ---
 interface Member { id: number; name: string; }
@@ -107,8 +139,14 @@ export default function Reports() {
     if (selectedGroup !== "ALL") {
         fetch(`${API_BASE}/api/loans/group/${selectedGroup}/summary`, { headers: { "loggedInUser": user?.username || "" } })
             .then(res => res.json())
-            .then(data => setAvailableLoans(data))
+            .then(data => {
+                // Normalize: API may return plain array OR paginated {content: [...]} - always store an array
+                const loans = Array.isArray(data) ? data : (Array.isArray(data?.content) ? data.content : []);
+                setAvailableLoans(loans);
+            })
             .catch(() => setAvailableLoans([]));
+    } else {
+        setAvailableLoans([]);
     }
   }, [selectedGroup]);
 
@@ -116,16 +154,27 @@ export default function Reports() {
     if (selectedLoanId !== "ALL") {
         fetch(`${API_BASE}/api/reports/installment-numbers?loanId=${selectedLoanId}`, { headers: { "loggedInUser": user?.username || "" } })
             .then(res => res.json())
-            .then(data => setAvailableInsts(data))
+            .then(data => {
+                // Normalize: always store an array
+                const insts = Array.isArray(data) ? data : (Array.isArray(data?.content) ? data.content : []);
+                setAvailableInsts(insts);
+            })
             .catch(() => setAvailableInsts([]));
+    } else {
+        setAvailableInsts([]);
     }
   }, [selectedLoanId]);
 
   const fetchMembers = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/members`, { headers: { "loggedInUser": user?.username || "" } });
-      if (res.ok) setMembers(await res.json());
-    } catch (e) {}
+      if (res.ok) {
+        const data = await res.json();
+        // Normalize: API may return plain array OR paginated {content: [...]}
+        const list = Array.isArray(data) ? data : (Array.isArray(data?.content) ? data.content : []);
+        setMembers(list);
+      }
+    } catch (e) { setMembers([]); }
   };
 
   const fetchGroups = async () => {
@@ -301,6 +350,24 @@ export default function Reports() {
         rows = reportData.map((l:any) => [l.memberName, l.installmentNo, l.dueDate, format(l.principal), format(l.interest), format(l.paid), format(l.balance), l.status]);
         footerRows = ["TOTAL", "-", "-", format(totals.principal), format(totals.interest), format(totals.paid), format(totals.balance), "-"];
         break;
+      case "financials":
+        title = "FINANCIAL STATEMENT REPORT";
+        subtitle = `Period: ${dateRange.start} — ${dateRange.end} | Group: ${selectedGroup === 'ALL' ? 'All Groups' : groups.find((g: any) => String(g.id) === selectedGroup)?.groupName || selectedGroup}`;
+        headers = ["Section", "Metric", "Amount (₹)"];
+        rows = [
+          ["Revenue", "Interest Yield (Paid Interest)", format(reportData.revenue.interest)],
+          ["Revenue", "Loan Charges",                   format(reportData.revenue.fees)],
+          ["Revenue", "Total Financial Revenue",         format(reportData.revenue.total)],
+          ["-", "-", "-"],
+          ["Portfolio", "Capital Disbursed",             format(reportData.portfolio.capitalDisbursed)],
+          ["Portfolio", "Total Collections",             format(reportData.portfolio.totalCollection)],
+          ["Portfolio", "Gross Outstanding",             format(reportData.portfolio.outstanding)],
+          ...( reportData.loanProfits || []).map((lp: any) => [
+            "Loan Profit", `Loan #${lp.loanId} (${lp.status})`, `P:${format(lp.principalRepaid)}  I:${format(lp.interestEarned)}`
+          ])
+        ];
+        footerRows = [];
+        break;
       default:
          toast.error("Format limited for this tab. Use CSV.");
          return;
@@ -310,6 +377,7 @@ export default function Reports() {
   };
 
   return (
+    <ReportErrorBoundary>
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -320,7 +388,7 @@ export default function Reports() {
           <Button variant="outline" size="sm" className="gap-2 font-bold" onClick={handleCSV} disabled={!reportData}>
             <Download className="h-3.5 w-3.5" /> Export CSV
           </Button>
-          <Button variant="outline" size="sm" className="gap-2 font-bold border-primary/20 hover:bg-primary/5" onClick={handlePDF} disabled={!reportData || activeTab === 'dashboard' || activeTab === 'financials'}>
+          <Button variant="outline" size="sm" className="gap-2 font-bold border-primary/20 hover:bg-primary/5" onClick={handlePDF} disabled={!reportData || activeTab === 'dashboard'}>
             <Printer className="h-3.5 w-3.5 text-primary" /> Print Report
           </Button>
         </div>
@@ -505,6 +573,7 @@ export default function Reports() {
         </div>
       </Tabs>
     </div>
+    </ReportErrorBoundary>
   );
 }
 
@@ -517,11 +586,13 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
     if (!data) return null;
     const isArrayExpected = ["loans", "members", "outstanding", "ledger"].includes(activeTab);
     if (isArrayExpected && !Array.isArray(data)) return null;
-    if (activeTab === "balanceSheet" && !data.opening) return null;
-    if (activeTab === "profitLoss" && !data.revenue) return null;
-    if (activeTab === "due" && !data.installments) return null;
-    if (activeTab === "financials" && !data.revenue) return null;
-    if (!totals && isArrayExpected) return null; 
+    if (isArrayExpected && Array.isArray(data) && data.length === 0) return null;
+    if (activeTab === "balanceSheet" && (!data.opening || !data.closing || !data.movement)) return null;
+    if (activeTab === "profitLoss" && (!data.revenue || !data.trends)) return null;
+    if (activeTab === "due" && (!data.installments || !data.summary)) return null;
+    if (activeTab === "financials" && (!data.revenue || !data.portfolio || !data.loanProfits)) return null;
+    // Ensure totals is safe (non-null object) for array-based tabs
+    const safeTotals = totals || {};
 
     switch(activeTab) {
         case "balanceSheet":
@@ -732,8 +803,8 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
                         ))}
                     </tbody>
                     <TotalFooter columns={[
-                        { label: "TOTAL ENTRIES", span: 4 }, { value: totals.total, isMoney: true }, { value: totals.collected, isMoney: true },
-                        { value: totals.pending, isMoney: true }, { value: "-" }, { value: "-" }
+                        { label: "TOTAL ENTRIES", span: 4 }, { value: safeTotals.total, isMoney: true }, { value: safeTotals.collected, isMoney: true },
+                        { value: safeTotals.pending, isMoney: true }, { value: "-" }, { value: "-" }
                     ]} />
                 </TableWrapper>
             );
@@ -754,8 +825,8 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
                         ))}
                     </tbody>
                     <TotalFooter columns={[
-                        { label: "TOTAL PORTFOLIO", span: 2 }, { value: totals.activeLoans }, { value: totals.totalLoan, isMoney: true },
-                        { value: totals.paid, isMoney: true }, { value: totals.pending, isMoney: true }, { value: totals.overdueCount }, { value: "-" }
+                        { label: "TOTAL PORTFOLIO", span: 2 }, { value: safeTotals.activeLoans }, { value: safeTotals.totalLoan, isMoney: true },
+                        { value: safeTotals.paid, isMoney: true }, { value: safeTotals.pending, isMoney: true }, { value: safeTotals.overdueCount }, { value: "-" }
                     ]} />
                 </TableWrapper>
             );
@@ -796,8 +867,8 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
                             ))}
                         </tbody>
                         <TotalFooter columns={[
-                            { label: "COLLECTION TOTALS", span: 3 }, { value: totals.dueAmount, isMoney: true }, { value: totals.paid, isMoney: true },
-                            { value: totals.balance, isMoney: true }, { value: "-" }
+                            { label: "COLLECTION TOTALS", span: 3 }, { value: safeTotals.dueAmount, isMoney: true }, { value: safeTotals.paid, isMoney: true },
+                            { value: safeTotals.balance, isMoney: true }, { value: "-" }
                         ]} />
                     </TableWrapper>
                 </div>
@@ -825,7 +896,7 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
                         ))}
                     </tbody>
                     <TotalFooter columns={[
-                        { label: "EXPOSURE AT RISK", span: 3 }, { value: totals.pendingAmount, isMoney: true, color: "text-rose-700" }, { value: totals.overdueCount }, { value: "-" }, { value: "-" }
+                        { label: "EXPOSURE AT RISK", span: 3 }, { value: safeTotals.pendingAmount, isMoney: true, color: "text-rose-700" }, { value: safeTotals.overdueCount }, { value: "-" }, { value: "-" }
                     ]} />
                 </TableWrapper>
             );
@@ -853,8 +924,8 @@ function ReportRenderer({ activeTab, data, trendData, totals, loading, dateRange
                         ))}
                     </tbody>
                     <TotalFooter columns={[
-                        { label: "LEDGER BALANCES", span: 3 }, { value: totals.principal, isMoney: true }, { value: totals.interest, isMoney: true },
-                        { value: totals.paid, isMoney: true }, { value: totals.balance, isMoney: true }, { value: "-" }
+                        { label: "LEDGER BALANCES", span: 3 }, { value: safeTotals.principal, isMoney: true }, { value: safeTotals.interest, isMoney: true },
+                        { value: safeTotals.paid, isMoney: true }, { value: safeTotals.balance, isMoney: true }, { value: "-" }
                     ]} />
                 </TableWrapper>
             );
